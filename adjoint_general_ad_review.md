@@ -92,3 +92,40 @@ stencil-local mechanism and (2) closing the two blockers. Suggested order:
 
 Items 1–2 stay inside `opm-adjoint` with public APIs; item 3 is the one that
 warrants an upstream micro-PR. **The next plan should start at item 1.**
+
+## 5. Notes for the generic single-slot AD work
+
+**A. Where the AD seed must be set is *not* the primary variables.** The forward
+code always seeds AD at the primary variables: `BlackOilPrimaryVariables::makeEvaluation`
+returns `createVariable(value, varIdx)` (slot = the state variable) when
+`timeIdx == linearizationType.time`, else `createConstant(value)` (frozen). That is why
+forward AD computes `dR/dstate`. For a *parameter* gradient the differentiation variable
+is the parameter, so the **state must be frozen** (`createConstant`, which is width-agnostic
+— works for `Eval<1>`) and the **seed set where the parameter enters**.
+
+**B. The kernels decide which parameters can be seeded *through* them.**
+- `computeStorage<LhsEval>` **decays** its IQ inputs (`saturation`, `invB`, `porosity`) to
+  `LhsEval` — i.e. takes the value. `calculateFluxes_` hard-casts `const Scalar trans =
+  nbInfo.trans`. ⇒ **porosity, transmissibility and permeability cannot carry an AD seed
+  through the kernels**; they are differentiated by **post-hoc scale on the kernel output**
+  (storage/flux are linear in them). This is the existing single-slot `general-ad` path and
+  is, by the kernel structure, the *only* way — porosity/perm/trans are **done** as single-slot
+  Eval<1> generic AD.
+- The interior-upwind **`mobility(phaseIdx, facedir)` is kept as `Evaluation`** in the flux
+  (not decayed). ⇒ **mobility (relperm → end points) is the one quantity that flows as AD
+  through the kernel**, so the "frozen-state IQ + seed in the IQ" mechanism applies precisely
+  to it. That is the genuinely new generic-AD work, and the harder one (deferred).
+
+**C. `LinearizationType` is a lever but not the mechanism.** Its `time` field gates
+`createVariable` vs `createConstant` (so it *can* freeze the state), and it was introduced
+partly to support other/sequential derivative schemes (`VarType::pressure`, `seqtransport`).
+But it is **not flexible enough** to express "freeze the state and seed an arbitrary
+parameter at its entry point" — a dedicated seeding seam in the IQ/material-law update is
+what the parameter-AD work needs.
+
+**D. Permeability appears in *well* parameters too.** The well connection transmissibility
+factor (CTF / WPI, Peaceman ∝ `Kh`) depends on permeability, so `dJ/dperm` has a contribution
+**through the well equations** (the perforation rate uses the perm-dependent well index). The
+cell-evaluator perm gradient does **not** include this `dCTF/dK` term (it lives in the well
+rows, like the endpoint well-row term). Flag when perm gradients are taken on decks where the
+well index is perm-derived — the gradient is otherwise missing the well-coupling part.
