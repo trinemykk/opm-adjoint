@@ -93,6 +93,17 @@ stencil-local mechanism and (2) closing the two blockers. Suggested order:
 Items 1–2 stay inside `opm-adjoint` with public APIs; item 3 is the one that
 warrants an upstream micro-PR. **The next plan should start at item 1.**
 
+## 4b. Validated at scale (SPE9_CP_SHORT, 9000 cells, DISGAS, multi-perf wells)
+
+The existing AD machinery holds at scale (record+replay ~1–1.5 s each):
+- **Separate IQ array → Jacobian: bitwise** (rel 0.0) over 23 substeps — the adjoint-owned IQ
+  array reproduces the forward Jacobian exactly on a 9000-cell DISGAS multi-perf case.
+- **general-ad vs analytic oracle, machine precision**: PV 9000 params 6e-16, TRANS 25665 params
+  1.8e-14, PERM 9000 params 1e-15.
+
+So porosity/trans/perm single-slot AD and the separate-IQ assembly are scale- and feature-robust;
+the open frontier is purely end points (FD, §3F).
+
 ## 5. Notes for the generic single-slot AD work
 
 **A. Where the AD seed must be set is *not* the primary variables.** The forward
@@ -122,6 +133,26 @@ partly to support other/sequential derivative schemes (`VarType::pressure`, `seq
 But it is **not flexible enough** to express "freeze the state and seed an arbitrary
 parameter at its entry point" — a dedicated seeding seam in the IQ/material-law update is
 what the parameter-AD work needs.
+
+**E. KNOWN LIMITATION — parameters that enter `nbInfo` get no full kernel-AD.**
+Any parameter whose only entry is the per-face `ResidualNBInfo` (transmissibility,
+and permeability through it) cannot be seeded as AD *through* the flux kernel: `nbInfo.trans`
+is a plain `double` and `calculateFluxes_` hard-casts it, and `ResidualNBInfo` is the
+GPU-shared per-face struct, so templating it would interfere with the GPU work. **Flagged as a
+problem for now.** It is *not* a blocker in practice: the flux is exactly linear in `trans`, so
+the parameter derivative is obtained by **post-hoc scale** — `d(trans)/d(perm)` (or w.r.t. any
+other variable) is computed by **AD outside the kernel** and multiplied onto the linear flux.
+That is the existing perm/trans `general-ad` path and stays the recommended route.
+
+**F. End-point (relperm) AD is too invasive for now.** The relperm/mobility is
+`MaterialLaw::relativePermeabilities(mobility, materialParams, fluidState)`
+(`FlowProblem.hpp:854`); the end point lives in `materialParams` (the cell's
+`EclEpsScalingPoints`), which are **`Scalar`**. Getting `d(relperm)/d(endpoint)` by AD requires
+those scaled-point params to be `Evaluation`-typed, which ripples through
+`EclEpsScalingPoints` / the material-law multiplexer / the two-phase laws — and the material law
+is **GPU-shared**. ⇒ too invasive (the upstream C.4 change). End points therefore stay on **FD**
+for now; the cheaper extension when wanted is **stencil-local** endpoint FD driven by the
+separate IQ array (`cell×~7` instead of `cell×Ncells`), which needs no material-law type change.
 
 **D. Permeability appears in *well* parameters too.** The well connection transmissibility
 factor (CTF / WPI, Peaceman ∝ `Kh`) depends on permeability, so `dJ/dperm` has a contribution

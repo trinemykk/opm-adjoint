@@ -166,6 +166,19 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-grpctrl-test.sh
               $<TARGET_FILE:flow_adjoint> ${_grpctrl} ${_testout}/fd_grpctrl)
   endif()
+  # Scale regression: separate-IQ Jacobian (and general-ad gradients) on
+  # SPE9 (9000 cells, DISGAS, multi-perforation wells).
+  if(EXISTS ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA)
+    add_test(NAME adjoint_jacobian_eval_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-jacobian-eval-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA ${_testout}/jaceval_spe9)
+    add_test(NAME adjoint_general_ad_oracle_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
+              ${_testout}/general_ad_oracle_spe9 1e-5 general-ad)
+  endif()
   if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
     add_test(NAME adjoint_replay_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
