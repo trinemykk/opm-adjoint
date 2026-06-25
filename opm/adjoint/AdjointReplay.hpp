@@ -366,25 +366,36 @@ private:
     {
         AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
         auto& liveMat = model_().linearizer().jacobian().istlMatrix();
-        // Copy the live matrix to inherit its exact sparsity, then refill.
-        auto myMat = liveMat;
-        evaluator.evalJacobian(myMat);
-
         const auto refDump = AdjointMatrixDump::from(liveMat);
-        const auto myDump = AdjointMatrixDump::from(myMat);
-        const auto diff = compare(refDump, myDump, 1e-300,
-                                  config_.replayAbsTolerance);
 
-        worstJacobianEval_ = std::max(worstJacobianEval_, diff.maxRelDiff);
-        const bool fail = !diff.withinTolerance(config_.replayTolerance);
+        // (1) model-cache IQ source (Step A).
+        auto myMat = liveMat; // copy to inherit the exact sparsity
+        evaluator.evalJacobian(myMat);
+        const auto diff = compare(refDump, AdjointMatrixDump::from(myMat),
+                                  1e-300, config_.replayAbsTolerance);
+
+        // (2) separate adjoint-owned IQ array, populated via the public
+        //     IntensiveQuantities::update() (reuses the forward physics) — the
+        //     substrate the adjoint manipulates. Must reproduce the same
+        //     Jacobian.
+        typename AdjointResidualEvaluator<TypeTag>::SeparateIQ sepIQ(simulator_);
+        auto sepMat = liveMat;
+        evaluator.evalJacobian(sepMat, sepIQ);
+        const auto sepDiff = compare(refDump, AdjointMatrixDump::from(sepMat),
+                                     1e-300, config_.replayAbsTolerance);
+
+        worstJacobianEval_ = std::max({worstJacobianEval_, diff.maxRelDiff,
+                                       sepDiff.maxRelDiff});
+        const bool fail = !diff.withinTolerance(config_.replayTolerance) ||
+                          !sepDiff.withinTolerance(config_.replayTolerance);
         if (fail) {
             jacobianEvalFailed_ = true;
         }
         OpmLog::info(fmt::format(
-            "jacobian-eval substep {:4d}: max abs diff {:.3e}, "
-            "max rel diff {:.3e} vs linearizer{}{}",
-            k, diff.maxAbsDiff, diff.maxRelDiff,
-            diff.structureMatches ? "" : "  (structure mismatch)",
+            "jacobian-eval substep {:4d}: model-IQ rel {:.3e} (abs {:.3e}), "
+            "separate-IQ rel {:.3e} (abs {:.3e}) vs linearizer{}",
+            k, diff.maxRelDiff, diff.maxAbsDiff,
+            sepDiff.maxRelDiff, sepDiff.maxAbsDiff,
             fail ? "  <-- EXCEEDS TOLERANCE" : ""));
     }
 

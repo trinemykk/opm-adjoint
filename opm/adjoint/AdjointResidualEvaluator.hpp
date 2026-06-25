@@ -49,8 +49,10 @@
 
 #include <dune/common/fvector.hh>
 
+#include <array>
 #include <cstddef>
 #include <type_traits>
+#include <vector>
 
 namespace Opm {
 
@@ -253,6 +255,21 @@ public:
     template<class Matrix>
     void evalJacobian(Matrix& jac) const
     {
+        // Default: use the model's cached intensive quantities.
+        const auto& model = simulator_.model();
+        evalJacobian(jac, [&model](unsigned cell, unsigned timeIdx)
+                          -> const IntensiveQuantities& {
+            return model.intensiveQuantities(cell, timeIdx);
+        });
+    }
+
+    //! \brief Assemble the Jacobian from a caller-supplied intensive-quantity
+    //!        source `iq(cell, timeIdx) -> const IntensiveQuantities&`. The
+    //!        adjoint passes either the model cache (above) or its own
+    //!        separate IQ array (`SeparateIQ`), which it can manipulate.
+    template<class Matrix, class IQGet>
+    void evalJacobian(Matrix& jac, IQGet&& iq) const
+    {
         using Block = typename Matrix::block_type;
         const auto& model = simulator_.model();
         const auto& problem = simulator_.problem();
@@ -261,8 +278,6 @@ public:
 
         jac = 0.0;
 
-        // d/dstate block from an Evaluation rate vector (the numEq derivative
-        // slots are this cell's primary variables).
         auto toBlock = [](const RateVector& adres) {
             Block b(0.0);
             for (int eq = 0; eq < numEq; ++eq) {
@@ -278,10 +293,10 @@ public:
         RateVector darcy(0.0);
         RateVector storage(0.0);
         for (std::size_t globI = 0; globI < numCells; ++globI) {
-            const auto& iqIn = model.intensiveQuantities(globI, 0);
+            const auto& iqIn = iq(static_cast<unsigned>(globI), 0);
             for (const auto& nb : neighborInfo[globI]) {
                 const unsigned globJ = nb.neighbor;
-                const auto& iqEx = model.intensiveQuantities(globJ, 0);
+                const auto& iqEx = iq(globJ, 0);
                 flux = 0.0;
                 darcy = 0.0;
                 LocalResidual::computeFlux(flux, darcy, globI, globJ, iqIn,
@@ -309,13 +324,54 @@ public:
         // --- pass 2: source (well perforation sources via problem.source) ---
         RateVector source(0.0);
         for (std::size_t globI = 0; globI < numCells; ++globI) {
-            const auto& iqIn = model.intensiveQuantities(globI, 0);
+            const auto& iqIn = iq(static_cast<unsigned>(globI), 0);
             source = 0.0;
             LocalResidual::computeSource(source, problem, iqIn, globI, 0);
             source *= -model.dofTotalVolume(globI);
             jac[globI][globI] += toBlock(source);
         }
     }
+
+    //! \brief A separate, adjoint-owned array of intensive quantities,
+    //!        populated by the public `IntensiveQuantities::update()` from the
+    //!        model's primary variables — reusing the full forward physics
+    //!        with no simulator change. It decouples the adjoint from the
+    //!        model's IQ cache and is the substrate the adjoint manipulates:
+    //!        it controls the primary variables it feeds in (and, once the
+    //!        update seeding is made externally controllable, seeded
+    //!        parameters). v1 reproduces the converged forward state at both
+    //!        time levels (full numEq-slot state AD).
+    class SeparateIQ
+    {
+    public:
+        explicit SeparateIQ(const Simulator& simulator)
+            : simulator_(simulator)
+        { rebuild(); }
+
+        //! \brief (Re)populate the array from the model's current solution.
+        void rebuild()
+        {
+            const auto& model = simulator_.model();
+            const auto& problem = simulator_.problem();
+            const std::size_t numCells = model.numGridDof();
+            for (unsigned timeIdx = 0; timeIdx < 2; ++timeIdx) {
+                iq_[timeIdx].resize(numCells);
+                const auto& solution = model.solution(timeIdx);
+                for (std::size_t i = 0; i < numCells; ++i) {
+                    iq_[timeIdx][i].update(problem, solution[i],
+                                           static_cast<unsigned>(i), timeIdx);
+                }
+            }
+        }
+
+        const IntensiveQuantities& operator()(unsigned cell,
+                                              unsigned timeIdx) const
+        { return iq_[timeIdx][cell]; }
+
+    private:
+        const Simulator& simulator_;
+        std::array<std::vector<IntensiveQuantities>, 2> iq_;
+    };
 
 private:
     //! \brief Scalar value of an Evaluation or a plain Scalar (so the same
