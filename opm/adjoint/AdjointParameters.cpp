@@ -34,6 +34,7 @@ AdjointConfig AdjointConfig::fromParameters()
     config.replayTolerance = Parameters::Get<Parameters::AdjointReplayTolerance>();
     config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
     config.residualEvalCheck = Parameters::Get<Parameters::AdjointResidualEvalCheck>();
+    config.gradientMethod = Parameters::Get<Parameters::AdjointGradientMethod>();
     config.objective = Parameters::Get<Parameters::AdjointObjective>();
     config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
     config.linearSolver = Parameters::Get<Parameters::AdjointLinearSolver>();
@@ -86,6 +87,10 @@ void registerAdjointParameters()
         ("During replay, also recompute the residual with the standalone "
          "AdjointResidualEvaluator and check it matches the linearizer "
          "(validation of the residual-only evaluator)");
+    Parameters::Register<Parameters::AdjointGradientMethod>
+        ("How PV/trans/perm gradients are accumulated: 'analytic' (closed "
+         "forms, default) or 'general' (stencil-local re-evaluation via the "
+         "residual evaluator)");
 }
 
 } // namespace Opm

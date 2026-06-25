@@ -88,6 +88,12 @@ struct AdjointReplayAbsTolerance { static constexpr double value = 1e-9; };
 //!        linearizer bitwise (validation of the residual-only evaluator).
 struct AdjointResidualEvalCheck { static constexpr bool value = false; };
 
+//! \brief How PV/trans/perm parameter gradients are accumulated:
+//!        "analytic" (hand-derived closed forms, default) or "general"
+//!        (stencil-local re-evaluation via AdjointResidualEvaluator;
+//!        all parameters in one backward sweep).
+struct AdjointGradientMethod { static constexpr auto value = "analytic"; };
+
 } // namespace Opm::Parameters
 
 namespace Opm {
@@ -103,6 +109,7 @@ struct AdjointConfig
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};
     bool residualEvalCheck{false}; //!< verify the standalone residual evaluator
+    std::string gradientMethod{"analytic"}; //!< "analytic" or "general"
     std::string objective{};  //!< objective specification
     std::string endpoints{};  //!< end-point parameter list
     std::string linearSolver{};  //!< adjoint linear solver spec

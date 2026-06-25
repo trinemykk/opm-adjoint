@@ -51,6 +51,7 @@
 #include <opm/adjoint/AdjointParallel.hpp>
 #include <opm/adjoint/AdjointDeckWarnings.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
+#include <opm/adjoint/AdjointResidualEvaluator.hpp>
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
 
@@ -134,6 +135,11 @@ public:
         if (!endpointDefs_.empty()) {
             OpmLog::info("Adjoint end-point gradients enabled for " +
                          endpointSpec);
+        }
+        generalGradients_ = (config_.gradientMethod == "general");
+        if (generalGradients_) {
+            OpmLog::info("Adjoint gradients: general (stencil-local "
+                         "re-evaluation of the residual)");
         }
     }
 
@@ -241,7 +247,11 @@ public:
 
             t0 = tick();
             computeWellAdjoints_(k, step.dt, lambda);
-            accumulateGradients_(step.dt, lambda);
+            if (generalGradients_) {
+                accumulateGeneralGradients_(step.dt, lambda);
+            } else {
+                accumulateGradients_(step.dt, lambda);
+            }
             timing_.gradients += secs(t0, tick());
             t0 = tick();
             accumulateEndpointGradients_(step.dt, lambda);
@@ -479,15 +489,32 @@ private:
         }
     }
 
+    //! \brief Analytic parameter gradients (hand-derived closed forms).
     void accumulateGradients_(double dt, const Vector& lambda)
+    {
+        accumulatePvAnalytic_(dt, lambda);
+        accumulateTransAnalytic_(dt, lambda);
+    }
+
+    //! \brief General parameter gradients: the same dJ/dθ for all parameters
+    //!        of a family in this one backward sweep, obtained by
+    //!        stencil-local re-evaluation of the residual
+    //!        (AdjointResidualEvaluator) instead of hand-derived formulas.
+    //!        FD now, AD-ready (see Step 3). Families are brought up in order
+    //!        PV -> trans -> perm; not-yet-general families fall back to the
+    //!        analytic accumulation so the gradient output stays complete.
+    void accumulateGeneralGradients_(double dt, const Vector& lambda)
+    {
+        accumulatePvGeneral_(dt, lambda);
+        accumulateTransAnalytic_(dt, lambda); // general trans: next increment
+    }
+
+    //! \brief PV-multiplier gradient, analytic: dR_i/dpvmult_i =
+    //!        (V_i/dt)(S_i(x_k) - S_i(x_{k-1})).
+    void accumulatePvAnalytic_(double dt, const Vector& lambda)
     {
         auto& model = simulator_.model();
         const std::size_t numCells = model.numGridDof();
-
-        // Pore-volume multiplier gradient from the storage term:
-        // dR_i/dpvmult_i = (V_i/dt)(S_i(x_k) - S_i(x_{k-1})); after the
-        // final replay linearization IQ(.,0) is at x_k and IQ(.,1) at
-        // x_{k-1}.
         for (std::size_t i = 0; i < numCells; ++i) {
             Dune::FieldVector<Scalar, numEq> storageNew;
             Dune::FieldVector<Scalar, numEq> storageOld;
@@ -501,6 +528,53 @@ private:
                                   (storageNew[eq] - storageOld[eq]);
             }
         }
+    }
+
+    //! \brief PV-multiplier perturbation: scales the storage (pore-volume)
+    //!        term of one cell. dJ/dpvmult is purely diagonal (PV enters
+    //!        neither the flux nor the source), so the stencil is {cell}.
+    struct PvPerturb
+    {
+        unsigned cell;
+        Scalar scale;
+        Scalar pvScale(unsigned c) const
+        { return c == cell ? scale : Scalar(1); }
+        Scalar transScale(unsigned, unsigned) const { return Scalar(1); }
+    };
+
+    //! \brief PV-multiplier gradient, general: central-difference the
+    //!        cell's own residual w.r.t. its pore-volume multiplier via the
+    //!        residual evaluator and contract with lambda. Matches the
+    //!        analytic value (storage is linear in the multiplier) and
+    //!        exercises the general mechanism on the simplest family.
+    void accumulatePvGeneral_(double /*dt*/, const Vector& lambda)
+    {
+        const std::size_t numCells = simulator_.model().numGridDof();
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
+        const Scalar h = 1e-7; // multiplier is O(1), so an absolute step
+        EqVec resPlus(0.0);
+        EqVec resMinus(0.0);
+        for (std::size_t i = 0; i < numCells; ++i) {
+            const PvPerturb plus{static_cast<unsigned>(i), Scalar(1) + h};
+            const PvPerturb minus{static_cast<unsigned>(i), Scalar(1) - h};
+            evaluator.evalCellResidualReservoir(static_cast<unsigned>(i),
+                                                plus, resPlus);
+            evaluator.evalCellResidualReservoir(static_cast<unsigned>(i),
+                                                minus, resMinus);
+            Scalar g = 0.0;
+            for (int eq = 0; eq < numEq; ++eq) {
+                g += lambda[i][eq] * (resPlus[eq] - resMinus[eq]) / (2.0 * h);
+            }
+            gradientPv_[i] += g;
+        }
+    }
+
+    //! \brief Transmissibility-multiplier gradient, analytic.
+    void accumulateTransAnalytic_(double /*dt*/, const Vector& lambda)
+    {
+        auto& model = simulator_.model();
+        const std::size_t numCells = model.numGridDof();
 
         // Transmissibility-multiplier gradient from the flux term:
         // dR_I/dtmult_f = flux_f (TPFA flux linear in trans), so
@@ -845,6 +919,7 @@ private:
     std::map<std::string, Dune::DynamicVector<Scalar>> lambdaWells_;
     std::vector<const EndpointParamDef<Scalar>*> endpointDefs_;
     std::vector<std::vector<Scalar>> gradientEndpoints_;
+    bool generalGradients_{false}; //!< use the stencil-local general mechanism
     Timing timing_;
 };
 

@@ -111,6 +111,12 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
               ${_testout}/fd_pv)
+    # General (stencil-local) gradient mechanism: random directional-
+    # derivative FD on the full gradient vector computed in one sweep.
+    add_test(NAME adjoint_dirderiv_pv_m1d
+      COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
+              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG pv
+              ${_testout}/dirderiv_pv)
     add_test(NAME adjoint_fd_trans
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-trans-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG

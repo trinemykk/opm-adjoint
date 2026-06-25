@@ -149,6 +149,69 @@ public:
         }
     }
 
+    //! \brief Null perturbation: every scale is 1 (used for the value pass
+    //!        and as the base class of family perturbations).
+    struct NoPerturb
+    {
+        Scalar pvScale(unsigned /*cell*/) const { return Scalar(1.0); }
+        Scalar transScale(unsigned /*i*/, unsigned /*j*/) const
+        { return Scalar(1.0); }
+    };
+
+    //! \brief Reservoir residual of one cell (flux + storage only, NO
+    //!        source) with a parameter perturbation applied to the
+    //!        transmissibility (flux term) and the pore-volume multiplier
+    //!        (storage term).
+    //!
+    //! This is the stencil-local building block for parameter gradients:
+    //! the residual of cell \p globI depends on a parameter θ only through
+    //! the flux of its faces (trans) and its own storage (pore volume), and
+    //! the well source is θ-independent for the PV/trans/perm families (so
+    //! it cancels in a central difference and is omitted here). \p perturb
+    //! supplies pvScale(cell) and transScale(i,j) (both 1 by default).
+    template<class Perturb>
+    void evalCellResidualReservoir(unsigned globI, const Perturb& perturb,
+                                   EqVector& res) const
+    {
+        const auto& model = simulator_.model();
+        const auto& problem = simulator_.problem();
+        const auto& neighborInfo = model.linearizer().getNeighborInfo();
+
+        res = 0.0;
+
+        // --- flux term with per-face trans scale ---
+        const auto& iqIn = model.intensiveQuantities(globI, /*timeIdx=*/0);
+        RateVector flux(0.0);
+        RateVector darcy(0.0);
+        for (const auto& nbInfo : neighborInfo[globI]) {
+            const unsigned globJ = nbInfo.neighbor;
+            const auto& iqEx = model.intensiveQuantities(globJ, /*timeIdx=*/0);
+            auto rnb = nbInfo.res_nbinfo;           // copy (mutable trans)
+            rnb.trans *= perturb.transScale(globI, globJ);
+            flux = 0.0;
+            darcy = 0.0;
+            LocalResidual::computeFlux(flux, darcy, globI, globJ, iqIn, iqEx,
+                                       rnb, problem.moduleParams());
+            for (int eq = 0; eq < numEq; ++eq) {
+                res[eq] += scalarValue_(flux[eq]) * rnb.faceArea;
+            }
+        }
+
+        // --- storage term with pore-volume scale ---
+        EqVector storageNew(0.0);
+        EqVector storageOld(0.0);
+        LocalResidual::template computeStorage<Scalar>(
+            storageNew, model.intensiveQuantities(globI, 0));
+        LocalResidual::template computeStorage<Scalar>(
+            storageOld, model.intensiveQuantities(globI, 1));
+        const Scalar storefac = model.dofTotalVolume(globI)
+                              / simulator_.timeStepSize();
+        const Scalar pv = perturb.pvScale(globI);
+        for (int eq = 0; eq < numEq; ++eq) {
+            res[eq] += pv * storefac * (storageNew[eq] - storageOld[eq]);
+        }
+    }
+
     //! \brief Residual of all grid cells (value pass), sized to numGridDof.
     void evalResidual(GlobalEqVector& out) const
     {
