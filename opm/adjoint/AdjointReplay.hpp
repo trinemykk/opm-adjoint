@@ -148,9 +148,15 @@ public:
                 "linearizer {:.3e} over {} substeps ({})",
                 worstResidualEval_, numSubsteps,
                 residualEvalFailed_ ? "FAIL" : "bitwise"));
+            OpmLog::info(fmt::format(
+                "Adjoint Jacobian-evaluator check: worst rel diff vs "
+                "linearizer {:.3e} over {} substeps ({})",
+                worstJacobianEval_, numSubsteps,
+                jacobianEvalFailed_ ? "FAIL" : "bitwise"));
         }
         warnAdjointDeckApproximations(simulator_);
-        const bool ok = (failed == 0) && !residualEvalFailed_;
+        const bool ok = (failed == 0) && !residualEvalFailed_ &&
+                        !jacobianEvalFailed_;
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
@@ -240,10 +246,12 @@ public:
         wellModel_().assembleWellEqGivenControls(meta.dt);
         model_().linearizer().linearizeDomain();
 
-        // Optional: validate the standalone residual-only evaluator against
-        // the just-assembled production linearizer residual (Step 1).
+        // Optional: validate the standalone evaluator against the
+        // just-assembled production linearizer - residual (Step 1) and the
+        // full Jacobian (Step A, general AD assembly).
         if (config_.residualEvalCheck) {
             checkResidualEvaluator_(k);
+            checkJacobianEvaluator_(k);
         }
 
         return compareWithStored_(k, worstResidual, worstJacobian);
@@ -349,6 +357,37 @@ private:
             fail ? "  <-- EXCEEDS TOLERANCE" : ""));
     }
 
+    //! \brief Reproduce the converged reservoir Jacobian with the standalone
+    //!        evaluator (the forward "analytic derivative" dR/dstate, before
+    //!        the well Schur complement) and compare it to the production
+    //!        linearizer matrix. A pass means the general AD assembly
+    //!        reproduces linearize_cell's Jacobian bitwise.
+    void checkJacobianEvaluator_(int k)
+    {
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        auto& liveMat = model_().linearizer().jacobian().istlMatrix();
+        // Copy the live matrix to inherit its exact sparsity, then refill.
+        auto myMat = liveMat;
+        evaluator.evalJacobian(myMat);
+
+        const auto refDump = AdjointMatrixDump::from(liveMat);
+        const auto myDump = AdjointMatrixDump::from(myMat);
+        const auto diff = compare(refDump, myDump, 1e-300,
+                                  config_.replayAbsTolerance);
+
+        worstJacobianEval_ = std::max(worstJacobianEval_, diff.maxRelDiff);
+        const bool fail = !diff.withinTolerance(config_.replayTolerance);
+        if (fail) {
+            jacobianEvalFailed_ = true;
+        }
+        OpmLog::info(fmt::format(
+            "jacobian-eval substep {:4d}: max abs diff {:.3e}, "
+            "max rel diff {:.3e} vs linearizer{}{}",
+            k, diff.maxAbsDiff, diff.maxRelDiff,
+            diff.structureMatches ? "" : "  (structure mismatch)",
+            fail ? "  <-- EXCEEDS TOLERANCE" : ""));
+    }
+
     bool compareWithStored_(int k, double& worstResidual, double& worstJacobian)
     {
         const auto& meta = meta_.substeps[k];
@@ -408,6 +447,8 @@ private:
     std::vector<BdiagBlock> bdiag_;
     double worstResidualEval_{0.0};
     bool residualEvalFailed_{false};
+    double worstJacobianEval_{0.0};
+    bool jacobianEvalFailed_{false};
 };
 
 } // namespace Opm

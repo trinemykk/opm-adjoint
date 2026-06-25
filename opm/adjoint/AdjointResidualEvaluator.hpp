@@ -236,6 +236,87 @@ public:
         }
     }
 
+    //! \brief Assemble the full reservoir Jacobian into \p jac (which must
+    //!        already have the linearizer's sparsity; it is zeroed first),
+    //!        reproducing TpfaLinearizer::linearize_cell +
+    //!        linearize_source_terms with the model's Evaluation intensive
+    //!        quantities and the shared static kernels — no new kernel code,
+    //!        no Evaluation-type changes in the simulator. This is the
+    //!        forward "analytic derivative": dResidual/dstate, before the
+    //!        well Schur complement.
+    //!
+    //! Block convention (mirrors the linearizer): the flux block of face
+    //! (I,J) is added to the diagonal (I,I) and its negative to the
+    //! off-diagonal (J,I); storage and source add to (I,I). The two-pass
+    //! order (all flux+storage, then all source) matches the linearizer's
+    //! linearize_/linearize_source_terms split for a bitwise result.
+    template<class Matrix>
+    void evalJacobian(Matrix& jac) const
+    {
+        using Block = typename Matrix::block_type;
+        const auto& model = simulator_.model();
+        const auto& problem = simulator_.problem();
+        const auto& neighborInfo = model.linearizer().getNeighborInfo();
+        const std::size_t numCells = model.numGridDof();
+
+        jac = 0.0;
+
+        // d/dstate block from an Evaluation rate vector (the numEq derivative
+        // slots are this cell's primary variables).
+        auto toBlock = [](const RateVector& adres) {
+            Block b(0.0);
+            for (int eq = 0; eq < numEq; ++eq) {
+                for (int pv = 0; pv < numEq; ++pv) {
+                    b[eq][pv] = adres[eq].derivative(pv);
+                }
+            }
+            return b;
+        };
+
+        // --- pass 1: flux + storage ---
+        RateVector flux(0.0);
+        RateVector darcy(0.0);
+        RateVector storage(0.0);
+        for (std::size_t globI = 0; globI < numCells; ++globI) {
+            const auto& iqIn = model.intensiveQuantities(globI, 0);
+            for (const auto& nb : neighborInfo[globI]) {
+                const unsigned globJ = nb.neighbor;
+                const auto& iqEx = model.intensiveQuantities(globJ, 0);
+                flux = 0.0;
+                darcy = 0.0;
+                LocalResidual::computeFlux(flux, darcy, globI, globJ, iqIn,
+                                           iqEx, nb.res_nbinfo,
+                                           problem.moduleParams());
+                flux *= nb.res_nbinfo.faceArea;
+                Block b = toBlock(flux);
+                jac[globI][globI] += b;
+                b *= -1.0;
+                jac[globJ][globI] += b;
+            }
+            storage = 0.0;
+            LocalResidual::template computeStorage<Evaluation>(storage, iqIn);
+            const Scalar storefac = model.dofTotalVolume(globI)
+                                  / simulator_.timeStepSize();
+            Block bs(0.0);
+            for (int eq = 0; eq < numEq; ++eq) {
+                for (int pv = 0; pv < numEq; ++pv) {
+                    bs[eq][pv] = storage[eq].derivative(pv) * storefac;
+                }
+            }
+            jac[globI][globI] += bs;
+        }
+
+        // --- pass 2: source (well perforation sources via problem.source) ---
+        RateVector source(0.0);
+        for (std::size_t globI = 0; globI < numCells; ++globI) {
+            const auto& iqIn = model.intensiveQuantities(globI, 0);
+            source = 0.0;
+            LocalResidual::computeSource(source, problem, iqIn, globI, 0);
+            source *= -model.dofTotalVolume(globI);
+            jac[globI][globI] += toBlock(source);
+        }
+    }
+
 private:
     //! \brief Scalar value of an Evaluation or a plain Scalar (so the same
     //!        code compiles for the value pass and, later, AD).
