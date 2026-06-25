@@ -117,6 +117,10 @@ if(HAVE_OPM_TESTS)
       COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG pv
               ${_testout}/dirderiv_pv)
+    add_test(NAME adjoint_dirderiv_perm_m1d
+      COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
+              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG perm
+              ${_testout}/dirderiv_perm 1e-2)
     # General gradient vs analytic oracle (PV, TRANS, PERM) on one deck.
     add_test(NAME adjoint_general_oracle_m1d
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh

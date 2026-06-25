@@ -30,13 +30,23 @@ STRICT = ["--enable-storage-cache=false", "--enable-adaptive-time-stepping=false
 
 os.makedirs(outdir, exist_ok=True)
 
-# Deck field perturbed for each family, and how the adjoint gradient maps to it.
-#   pv: gradient file is dJ/d(pv-multiplier) = g; storage ∝ porosity so
-#       dJ/dporo_i = g_i / poro_i; the FD perturbs poro.txt.
-FIELD = {"pv": ("poro.txt", "ADJOINT_GRADIENTS_PV.txt")}
+# Deck field perturbed for each family, and how the adjoint gradient maps to
+# the perturbed field.
+#   pv:   gradient file is dJ/d(pv-multiplier); storage ∝ porosity so
+#         dJ/dporo_i = g_i / poro_i; the FD perturbs poro.txt.
+#   perm: gradient file is dJ/dK in SI (per m^2); permx.txt is in mD, so
+#         dJ/dK_mD = g_i * 9.869233e-16; the FD perturbs permx.txt.
+DARCY = 9.869232667160128e-16  # 1 mD in m^2
+FIELD = {
+    "pv":   dict(field="poro.txt",  grad="ADJOINT_GRADIENTS_PV.txt",   col=0,
+                 xform=lambda g, fv: g / fv),
+    "perm": dict(field="permx.txt", grad="ADJOINT_GRADIENTS_PERM.txt", col=0,
+                 xform=lambda g, fv: g * DARCY),
+}
 if family not in FIELD:
     print(f"unsupported family '{family}'"); sys.exit(2)
-fieldfile, gradfile = FIELD[family]
+spec = FIELD[family]
+fieldfile, gradfile, gcol = spec["field"], spec["grad"], spec["col"]
 
 def read_col(path, col=0, skip_hash=True):
     vals = []
@@ -94,10 +104,10 @@ gradpath = os.path.join(base, f"{deckname}.{gradfile}")
 if not os.path.exists(gradpath):
     print(g.stdout[-800:]); print("no gradient file"); sys.exit(1)
 
-g_mult = read_col(gradpath)                  # dJ/d(multiplier)
+g_raw = read_col(gradpath, gcol)             # raw adjoint gradient (file basis)
 field0 = read_col(os.path.join(inputdir, fieldfile))
-# map multiplier-gradient to the perturbed deck field (porosity)
-g_field = [gm / f for gm, f in zip(g_mult, field0)]
+# map the adjoint gradient to the basis of the perturbed deck field
+g_field = [spec["xform"](g, f) for g, f in zip(g_raw, field0)]
 n = len(g_field)
 print(f"family={family}: {n} parameters, eps={eps}, reltol={reltol}")
 

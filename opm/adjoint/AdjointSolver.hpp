@@ -177,6 +177,7 @@ public:
         const std::size_t numCells = model.numGridDof();
 
         gradientPv_.assign(numCells, 0.0);
+        gradientPermGeneral_.assign(numCells, {0.0, 0.0, 0.0});
 
         Vector lambda(numCells);
         Vector lambdaPrev(numCells);
@@ -507,6 +508,7 @@ private:
     {
         accumulatePvGeneral_(dt, lambda);
         accumulateTransGeneral_(dt, lambda);
+        accumulatePermGeneral_(dt, lambda);
     }
 
     //! \brief PV-multiplier gradient, analytic: dR_i/dpvmult_i =
@@ -637,6 +639,135 @@ private:
                       lambda[globJ][eq] * (rJp[eq] - rJm[eq])) / (2.0 * h);
             }
             gradientTrans_[f] += g;
+        }
+    }
+
+    //! \brief A face incident to a cell, with the permeability direction it
+    //!        belongs to (X/Y/Z -> 0/1/2; NNCs are skipped).
+    struct IncidentFace
+    {
+        unsigned neighbor;
+        int dim;
+    };
+
+    //! \brief Build, once, the per-cell list of incident faces with their
+    //!        permeability direction (from faces_/faceDirs_).
+    void ensureCellIncident_()
+    {
+        if (!cellIncident_.empty()) {
+            return;
+        }
+        ensureFaces_();
+        const std::size_t numCells = simulator_.model().numGridDof();
+        cellIncident_.assign(numCells, {});
+        for (std::size_t f = 0; f < faces_.size(); ++f) {
+            int dim;
+            switch (faceDirs_[f]) {
+            case FaceDir::XPlus:
+            case FaceDir::XMinus: dim = 0; break;
+            case FaceDir::YPlus:
+            case FaceDir::YMinus: dim = 1; break;
+            case FaceDir::ZPlus:
+            case FaceDir::ZMinus: dim = 2; break;
+            default: continue; // NNC: no single permeability direction
+            }
+            const auto globI = faces_[f].first;
+            const auto globJ = faces_[f].second;
+            cellIncident_[globI].push_back({globJ, dim});
+            if (globJ < cellIncident_.size()) {
+                cellIncident_[globJ].push_back(
+                    {static_cast<unsigned>(globI), dim});
+            }
+        }
+    }
+
+    //! \brief Permeability perturbation of one cell along one direction: it
+    //!        scales the (linear-in-K) half-transmissibility of that cell on
+    //!        each incident face in the direction, which rescales the face's
+    //!        harmonic-mean transmissibility. Stencil is {cell} ∪ neighbours.
+    struct PermPerturb
+    {
+        struct FaceScale { unsigned a; unsigned b; Scalar scale; };
+        std::vector<FaceScale> faces; // affected faces (unordered pair)
+        Scalar pvScale(unsigned) const { return Scalar(1); }
+        Scalar transScale(unsigned i, unsigned j) const
+        {
+            const unsigned a = i < j ? i : j;
+            const unsigned b = i < j ? j : i;
+            for (const auto& fs : faces) {
+                if (fs.a == a && fs.b == b) {
+                    return fs.scale;
+                }
+            }
+            return Scalar(1);
+        }
+    };
+
+    //! \brief Permeability gradient, general: for each cell and direction,
+    //!        central-difference the residual of the cell and its neighbours
+    //!        w.r.t. the directional permeability (via the half-trans -> trans
+    //!        rescaling) and contract with lambda. dJ/dK is recovered from the
+    //!        relative (factor) perturbation by dividing by K. Matches the
+    //!        analytic chain-rule perm gradient.
+    void accumulatePermGeneral_(double /*dt*/, const Vector& lambda)
+    {
+        ensureCellIncident_();
+        const auto& trans = simulator_.problem().eclTransmissibilities();
+        const std::size_t numCells = simulator_.model().numGridDof();
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
+        const Scalar h = 1e-7;
+        EqVec rP(0.0), rM(0.0);
+
+        for (std::size_t c = 0; c < numCells; ++c) {
+            if (!parallel_.interior(c)) {
+                continue;
+            }
+            for (int dim = 0; dim < 3; ++dim) {
+                const Scalar kc = trans.permeability(c)[dim][dim];
+                if (kc <= 0.0) {
+                    continue;
+                }
+                // Affected faces (this cell, this direction) and their
+                // harmonic-mean trans scale for K_c -> K_c*(1±h).
+                PermPerturb plus, minus;
+                std::vector<unsigned> stencil{static_cast<unsigned>(c)};
+                for (const auto& inc : cellIncident_[c]) {
+                    if (inc.dim != dim) {
+                        continue;
+                    }
+                    const Scalar hc = trans.halfTransmissibility(
+                        static_cast<unsigned>(c), inc.neighbor);
+                    const Scalar ho = trans.halfTransmissibility(
+                        inc.neighbor, static_cast<unsigned>(c));
+                    if (hc <= 0.0 || hc + ho <= 0.0) {
+                        continue;
+                    }
+                    auto scaleOf = [&](Scalar s) {
+                        const Scalar tNew = (s * hc) * ho / (s * hc + ho);
+                        const Scalar tOld = hc * ho / (hc + ho);
+                        return tNew / tOld;
+                    };
+                    const unsigned a = std::min<unsigned>(c, inc.neighbor);
+                    const unsigned b = std::max<unsigned>(c, inc.neighbor);
+                    plus.faces.push_back({a, b, scaleOf(Scalar(1) + h)});
+                    minus.faces.push_back({a, b, scaleOf(Scalar(1) - h)});
+                    stencil.push_back(inc.neighbor);
+                }
+                if (plus.faces.empty()) {
+                    continue;
+                }
+                Scalar gd = 0.0;
+                for (const unsigned k : stencil) {
+                    evaluator.evalCellResidualReservoir(k, plus, rP);
+                    evaluator.evalCellResidualReservoir(k, minus, rM);
+                    for (int eq = 0; eq < numEq; ++eq) {
+                        gd += lambda[k][eq] * (rP[eq] - rM[eq]) / (2.0 * h);
+                    }
+                }
+                // factor perturbation -> dJ/dK by dividing by K.
+                gradientPermGeneral_[c][dim] += gd / kc;
+            }
         }
     }
 
@@ -811,7 +942,12 @@ private:
         wellCtrlLines = parallel_.gatherLines(wellCtrlLines);
         const auto lambdaLines = parallel_.gatherLines(wellAdjointLog_);
 
-        const auto permGathered = gatherPermGradients_();
+        // Permeability: the general method accumulates dJ/dK directly per
+        // substep (gradientPermGeneral_); the analytic method post-processes
+        // the accumulated trans gradient through the half-trans chain rule.
+        const auto permGathered = generalGradients_
+            ? gatherPermArray_(gradientPermGeneral_)
+            : gatherPermGradients_();
 
         if (parallel_.rank() != 0) {
             return;
@@ -939,7 +1075,15 @@ private:
             }
         }
 
-        // Gather each permeability direction as a per-cell field.
+        return gatherPermArray_(gradient);
+    }
+
+    //! \brief Gather a per-cell 3-vector field (one column per permeability
+    //!        direction) onto rank 0.
+    std::vector<std::array<Scalar, 3>>
+    gatherPermArray_(const std::vector<std::array<Scalar, 3>>& gradient)
+    {
+        const std::size_t numCells = gradient.size();
         std::array<std::vector<Scalar>, 3> comp;
         for (int d = 0; d < 3; ++d) {
             std::vector<Scalar> column(numCells);
@@ -973,6 +1117,8 @@ private:
     std::vector<const EndpointParamDef<Scalar>*> endpointDefs_;
     std::vector<std::vector<Scalar>> gradientEndpoints_;
     bool generalGradients_{false}; //!< use the stencil-local general mechanism
+    std::vector<std::array<Scalar, 3>> gradientPermGeneral_; //!< general dJ/dK
+    std::vector<std::vector<IncidentFace>> cellIncident_; //!< per-cell faces+dir
     Timing timing_;
 };
 

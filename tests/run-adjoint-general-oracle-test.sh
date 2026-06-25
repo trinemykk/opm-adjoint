@@ -57,12 +57,16 @@ def vals(p):
         out.append(float(s.split()[-1]))   # last column is the gradient
     return out
 va, vg = vals(a), vals(g)
-maxrel = 0.0
-for x, y in zip(va, vg):
-    denom = max(abs(x), abs(y), 1e-300)
-    maxrel = max(maxrel, abs(x - y) / denom)
-ok = maxrel < tol
-print(f"{kind}: {len(va)} params, max rel diff {maxrel:.2e}  {'PASS' if ok else 'FAIL'}")
+# Infinity-norm relative error: max abs diff normalized by the family's
+# largest magnitude. This is the right metric for comparing gradient
+# vectors - a per-component relative diff is ill-conditioned on the many
+# near-zero components (e.g. PERMY/PERMZ in a near-1D flow).
+maxabs = max((abs(x) for x in va), default=0.0)
+maxdiff = max((abs(x - y) for x, y in zip(va, vg)), default=0.0)
+rel = maxdiff / maxabs if maxabs > 0 else 0.0
+ok = rel < tol
+print(f"{kind}: {len(va)} params, inf-norm rel diff {rel:.2e}  "
+      f"{'PASS' if ok else 'FAIL'}")
 sys.exit(0 if ok else 1)
 EOF
 )
