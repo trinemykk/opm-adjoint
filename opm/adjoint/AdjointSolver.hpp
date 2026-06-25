@@ -60,6 +60,8 @@
 
 #include <opm/simulators/wells/StandardWell.hpp>
 
+#include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
+
 #include <dune/common/fvector.hh>
 #include <dune/istl/bvector.hh>
 
@@ -497,7 +499,20 @@ private:
             // R_ctrl = (rate or bhp) - target, so dR_ctrl/d(target) = -1
             // and dJ/d(target) accumulates -lambda_w[last] over the
             // substeps where this control is active.
-            controlGradient_[stdWell->name()] -= lambdaW[numWellEq - 1];
+            const Scalar contribution = -lambdaW[numWellEq - 1];
+            controlGradient_[stdWell->name()] += contribution;
+
+            // Per-active-control-mode breakdown: only one control mode is
+            // binding on a well at a given substep, but its row is always the
+            // last well equation, so -lambda_w[last] is dJ/d(that mode's
+            // target). Tagging by the converged active mode lets the one
+            // backward sweep accumulate a separate derivative for EVERY
+            // control that was active at some step (BHP, ORAT, WRAT, ...).
+            const auto& ws = wellModel.wellState().well(stdWell->name());
+            const std::string mode = stdWell->isProducer()
+                ? WellProducerCMode2String(ws.production_cmode)
+                : WellInjectorCMode2String(ws.injection_cmode);
+            controlGradientByMode_[stdWell->name()][mode] += contribution;
         }
     }
 
@@ -1106,6 +1121,19 @@ private:
             wellCtrlLines.push_back(line.str());
         }
         wellCtrlLines = parallel_.gatherLines(wellCtrlLines);
+        // Per-active-control-mode breakdown: one line per (well, mode), the
+        // derivative w.r.t. that mode's target accumulated over the substeps
+        // where it was the binding control.
+        std::vector<std::string> wellCtrlByModeLines;
+        for (const auto& [well, byMode] : controlGradientByMode_) {
+            for (const auto& [mode, value] : byMode) {
+                std::ostringstream line;
+                line.precision(16);
+                line << well << " " << mode << " " << value;
+                wellCtrlByModeLines.push_back(line.str());
+            }
+        }
+        wellCtrlByModeLines = parallel_.gatherLines(wellCtrlByModeLines);
         const auto lambdaLines = parallel_.gatherLines(wellAdjointLog_);
 
         // Permeability: the general method accumulates dJ/dK directly per
@@ -1167,6 +1195,19 @@ private:
             }
         }
         {
+            // Derivatives w.r.t. ALL controls that were active at some step,
+            // from the one backward sweep: dJ/d(target) per (well, mode),
+            // accumulated over the substeps where that mode was binding.
+            std::ofstream os(base + ".ADJOINT_GRADIENTS_WELLCTRL_BYMODE.txt");
+            os.precision(16);
+            os << "# well mode dJ/d(target): derivative w.r.t. each active "
+                  "control mode's target, accumulated over the substeps where "
+                  "it was binding; SI units (rate: per m3/s, bhp: per Pa)\n";
+            for (const auto& line : wellCtrlByModeLines) {
+                os << line << "\n";
+            }
+        }
+        {
             std::ofstream os(base + ".ADJOINT_LAMBDA_WELLS.txt");
             os << "# substep well lambda_w (one line per well per substep, "
                   "backward order)\n";
@@ -1174,7 +1215,7 @@ private:
                 os << line << "\n";
             }
         }
-        std::string kinds = "PV,TRANS,PERM,WELLCTRL";
+        std::string kinds = "PV,TRANS,PERM,WELLCTRL,WELLCTRL_BYMODE";
         for (const auto* def : endpointDefs_) {
             kinds += ",ENDPOINT_" + def->name;
         }
@@ -1279,6 +1320,8 @@ private:
     std::vector<Scalar> gradientTrans_;
     std::vector<std::string> wellAdjointLog_;
     std::map<std::string, Scalar> controlGradient_;
+    //! well -> active-control-mode -> dJ/d(that mode's target).
+    std::map<std::string, std::map<std::string, Scalar>> controlGradientByMode_;
     std::map<std::string, Dune::DynamicVector<Scalar>> lambdaWells_;
     std::vector<const EndpointParamDef<Scalar>*> endpointDefs_;
     std::vector<std::vector<Scalar>> gradientEndpoints_;
