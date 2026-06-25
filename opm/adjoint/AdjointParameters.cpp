@@ -33,6 +33,7 @@ AdjointConfig AdjointConfig::fromParameters()
     config.path = Parameters::Get<Parameters::AdjointFile>();
     config.replayTolerance = Parameters::Get<Parameters::AdjointReplayTolerance>();
     config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
+    config.residualEvalCheck = Parameters::Get<Parameters::AdjointResidualEvalCheck>();
     config.objective = Parameters::Get<Parameters::AdjointObjective>();
     config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
     config.linearSolver = Parameters::Get<Parameters::AdjointLinearSolver>();
@@ -81,6 +82,10 @@ void registerAdjointParameters()
     Parameters::Register<Parameters::AdjointReplayAbsTolerance>
         ("Absolute noise floor for the adjoint replay comparison; entry "
          "differences below this value count as rounding noise");
+    Parameters::Register<Parameters::AdjointResidualEvalCheck>
+        ("During replay, also recompute the residual with the standalone "
+         "AdjointResidualEvaluator and check it matches the linearizer "
+         "(validation of the residual-only evaluator)");
 }
 
 } // namespace Opm

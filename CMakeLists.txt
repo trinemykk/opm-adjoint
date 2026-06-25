@@ -100,6 +100,10 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/replay_m1d)
+    add_test(NAME adjoint_residual_eval_m1d
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-residual-eval-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/reseval_m1d)
     add_test(NAME adjoint_gradient_regression
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-gradient-regression.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d} ${_testout}/gradreg)
@@ -142,6 +146,10 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/replay_spe1)
+    add_test(NAME adjoint_residual_eval_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-residual-eval-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/reseval_spe1)
     add_test(NAME adjoint_matchref_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
               $<TARGET_FILE:flow_adjoint>

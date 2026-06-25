@@ -83,6 +83,11 @@ struct AdjointReplayTolerance { static constexpr double value = 1e-12; };
 //!        and excluded from the relative criterion.
 struct AdjointReplayAbsTolerance { static constexpr double value = 1e-9; };
 
+//! \brief During replay, also recompute the residual with the standalone
+//!        AdjointResidualEvaluator and verify it matches the production
+//!        linearizer bitwise (validation of the residual-only evaluator).
+struct AdjointResidualEvalCheck { static constexpr bool value = false; };
+
 } // namespace Opm::Parameters
 
 namespace Opm {
@@ -97,6 +102,7 @@ struct AdjointConfig
     std::string path{};       //!< archive path ("" = derive from case name)
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};
+    bool residualEvalCheck{false}; //!< verify the standalone residual evaluator
     std::string objective{};  //!< objective specification
     std::string endpoints{};  //!< end-point parameter list
     std::string linearSolver{};  //!< adjoint linear solver spec

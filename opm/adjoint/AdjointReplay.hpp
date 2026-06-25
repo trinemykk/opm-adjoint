@@ -46,6 +46,10 @@
 #include <opm/adjoint/AdjointStorage.hpp>
 #include <opm/adjoint/AdjointDeckWarnings.hpp>
 #include <opm/adjoint/AdjointSystemIO.hpp>
+#include <opm/adjoint/AdjointResidualEvaluator.hpp>
+
+#include <algorithm>
+#include <cmath>
 
 #include <dune/common/fmatrix.hh>
 
@@ -138,8 +142,16 @@ public:
                          "against; record with --adjoint-save-system=true for "
                          "verification)");
         }
+        if (config_.residualEvalCheck) {
+            OpmLog::info(fmt::format(
+                "Adjoint residual-evaluator check: worst rel diff vs "
+                "linearizer {:.3e} over {} substeps ({})",
+                worstResidualEval_, numSubsteps,
+                residualEvalFailed_ ? "FAIL" : "bitwise"));
+        }
         warnAdjointDeckApproximations(simulator_);
-        return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        const bool ok = (failed == 0) && !residualEvalFailed_;
+        return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     //! \brief Recreate the converged linearization of forward substep \p k.
@@ -228,6 +240,12 @@ public:
         wellModel_().assembleWellEqGivenControls(meta.dt);
         model_().linearizer().linearizeDomain();
 
+        // Optional: validate the standalone residual-only evaluator against
+        // the just-assembled production linearizer residual (Step 1).
+        if (config_.residualEvalCheck) {
+            checkResidualEvaluator_(k);
+        }
+
         return compareWithStored_(k, worstResidual, worstJacobian);
     }
 
@@ -287,6 +305,50 @@ private:
         }
     }
 
+    //! \brief Recompute the residual with the standalone evaluator and
+    //!        compare it to the production linearizer residual (which holds
+    //!        the converged system after the final linearizeDomain). A pass
+    //!        means the residual-only evaluator reproduces linearize_cell +
+    //!        linearize_source_terms bitwise.
+    void checkResidualEvaluator_(int k)
+    {
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        const auto& live = model_().linearizer().residual();
+        const std::size_t numCells = model_().numGridDof();
+
+        typename AdjointResidualEvaluator<TypeTag>::EqVector res(0.0);
+        double maxAbs = 0.0;
+        double maxRelSignificant = 0.0; // rel diff only where abs clears the floor
+        for (std::size_t i = 0; i < numCells; ++i) {
+            evaluator.evalCellResidual(static_cast<unsigned>(i), res);
+            for (int eq = 0; eq < numEq; ++eq) {
+                const double a = res[eq];
+                const double b = live[i][eq];
+                const double absDiff = std::abs(a - b);
+                maxAbs = std::max(maxAbs, absDiff);
+                // At convergence the residual is ~0, so a relative criterion
+                // alone is ill-conditioned. Mirror the replay comparison: an
+                // entry only matters once its absolute difference clears the
+                // noise floor; then judge it on the relative tolerance.
+                if (absDiff > config_.replayAbsTolerance) {
+                    const double denom = std::max(std::abs(a), std::abs(b));
+                    const double rel = (denom > 0.0) ? absDiff / denom : 0.0;
+                    maxRelSignificant = std::max(maxRelSignificant, rel);
+                }
+            }
+        }
+        worstResidualEval_ = std::max(worstResidualEval_, maxRelSignificant);
+        const bool fail = maxRelSignificant > config_.replayTolerance;
+        if (fail) {
+            residualEvalFailed_ = true;
+        }
+        OpmLog::info(fmt::format(
+            "residual-eval substep {:4d}: max abs diff {:.3e}, "
+            "max rel diff (above {:.0e} floor) {:.3e} vs linearizer{}",
+            k, maxAbs, config_.replayAbsTolerance, maxRelSignificant,
+            fail ? "  <-- EXCEEDS TOLERANCE" : ""));
+    }
+
     bool compareWithStored_(int k, double& worstResidual, double& worstJacobian)
     {
         const auto& meta = meta_.substeps[k];
@@ -344,6 +406,8 @@ private:
     AdjointMeta meta_;
     bool computeBdiagEnabled_{false};
     std::vector<BdiagBlock> bdiag_;
+    double worstResidualEval_{0.0};
+    bool residualEvalFailed_{false};
 };
 
 } // namespace Opm
