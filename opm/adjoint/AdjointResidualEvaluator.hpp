@@ -50,6 +50,7 @@
 #include <dune/common/fvector.hh>
 
 #include <cstddef>
+#include <type_traits>
 
 namespace Opm {
 
@@ -168,32 +169,43 @@ public:
     //! the flux of its faces (trans) and its own storage (pore volume), and
     //! the well source is θ-independent for the PV/trans/perm families (so
     //! it cancels in a central difference and is omitted here). \p perturb
-    //! supplies pvScale(cell) and transScale(i,j) (both 1 by default).
-    template<class Perturb>
+    //! supplies pvScale(cell) and transScale(i,j).
+    //!
+    //! The result element type follows the perturbation's scale type: a
+    //! Scalar scale gives a Scalar residual (the FD path); a seeded
+    //! Evaluation scale gives an Evaluation residual whose derivative is the
+    //! exact dR/dθ (the AD path, Step 3). Because the TPFA flux is linear in
+    //! trans, the trans scale is applied to the flux *value* post-hoc, which
+    //! is exact and lets the scale be an AD type even though the kernel's
+    //! transmissibility field is a plain double.
+    template<class Perturb, class ResBlock>
     void evalCellResidualReservoir(unsigned globI, const Perturb& perturb,
-                                   EqVector& res) const
+                                   ResBlock& res) const
     {
+        using Elem = std::decay_t<decltype(res[0])>;
         const auto& model = simulator_.model();
         const auto& problem = simulator_.problem();
         const auto& neighborInfo = model.linearizer().getNeighborInfo();
 
-        res = 0.0;
+        for (int eq = 0; eq < numEq; ++eq) {
+            res[eq] = Elem(0);
+        }
 
-        // --- flux term with per-face trans scale ---
+        // --- flux term: trans scale applied to the (linear-in-trans) flux ---
         const auto& iqIn = model.intensiveQuantities(globI, /*timeIdx=*/0);
         RateVector flux(0.0);
         RateVector darcy(0.0);
         for (const auto& nbInfo : neighborInfo[globI]) {
             const unsigned globJ = nbInfo.neighbor;
             const auto& iqEx = model.intensiveQuantities(globJ, /*timeIdx=*/0);
-            auto rnb = nbInfo.res_nbinfo;           // copy (mutable trans)
-            rnb.trans *= perturb.transScale(globI, globJ);
             flux = 0.0;
             darcy = 0.0;
             LocalResidual::computeFlux(flux, darcy, globI, globJ, iqIn, iqEx,
-                                       rnb, problem.moduleParams());
+                                       nbInfo.res_nbinfo, problem.moduleParams());
+            const auto ts = perturb.transScale(globI, globJ);
+            const Scalar faceArea = nbInfo.res_nbinfo.faceArea;
             for (int eq = 0; eq < numEq; ++eq) {
-                res[eq] += scalarValue_(flux[eq]) * rnb.faceArea;
+                res[eq] += ts * (scalarValue_(flux[eq]) * faceArea);
             }
         }
 
@@ -206,9 +218,9 @@ public:
             storageOld, model.intensiveQuantities(globI, 1));
         const Scalar storefac = model.dofTotalVolume(globI)
                               / simulator_.timeStepSize();
-        const Scalar pv = perturb.pvScale(globI);
+        const auto pv = perturb.pvScale(globI);
         for (int eq = 0; eq < numEq; ++eq) {
-            res[eq] += pv * storefac * (storageNew[eq] - storageOld[eq]);
+            res[eq] += pv * (storefac * (storageNew[eq] - storageOld[eq]));
         }
     }
 

@@ -89,8 +89,9 @@ void registerAdjointParameters()
          "(validation of the residual-only evaluator)");
     Parameters::Register<Parameters::AdjointGradientMethod>
         ("How PV/trans/perm gradients are accumulated: 'analytic' (closed "
-         "forms, default) or 'general' (stencil-local re-evaluation via the "
-         "residual evaluator)");
+         "forms, default), 'general' (stencil-local re-evaluation via the "
+         "residual evaluator, finite difference), or 'general-ad' (the same "
+         "stencil-local mechanism with seeded AD, exact dR/dθ in one pass)");
 }
 
 } // namespace Opm

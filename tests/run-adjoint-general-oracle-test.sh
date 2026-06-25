@@ -6,14 +6,18 @@
 # gradient files.
 #
 # Usage:
-#   run-adjoint-general-oracle-test.sh <flow_adjoint> <deck> <outdir> [reltol]
+#   run-adjoint-general-oracle-test.sh <flow_adjoint> <deck> <outdir>
+#                                      [reltol] [method]
+# method: 'general' (finite difference, default) or 'general-ad' (seeded AD,
+# which reproduces the analytic gradient to ~machine precision).
 
 set -u
 
-FLOW=${1:?usage: $0 <flow_adjoint> <deck> <outdir> [reltol]}
+FLOW=${1:?usage: $0 <flow_adjoint> <deck> <outdir> [reltol] [method]}
 DECK=${2:?missing deck}
 OUTDIR=${3:?missing outdir}
 RELTOL=${4:-1e-5}
+METHOD=${5:-general}
 
 CASE=$(basename "${DECK}" .DATA)
 STRICT="--enable-storage-cache=false --enable-adaptive-time-stepping=false \
@@ -38,7 +42,7 @@ run_method() { # <method> <suffix>
 }
 
 run_method analytic an
-run_method general gen
+run_method "${METHOD}" gen
 
 status=0
 for kind in PV TRANS PERM; do

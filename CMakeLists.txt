@@ -126,6 +126,12 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
               ${_testout}/general_oracle_m1d)
+    # Seeded-AD gradient must reproduce the analytic gradient to ~machine
+    # precision (exact dR/dθ in one pass).
+    add_test(NAME adjoint_general_ad_oracle_m1d
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
+              ${_testout}/general_ad_oracle_m1d 1e-10 general-ad)
     add_test(NAME adjoint_fd_trans
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-trans-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
@@ -169,6 +175,11 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/general_oracle_spe1)
+    add_test(NAME adjoint_general_ad_oracle_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA
+              ${_testout}/general_ad_oracle_spe1 1e-10 general-ad)
     add_test(NAME adjoint_matchref_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
               $<TARGET_FILE:flow_adjoint>

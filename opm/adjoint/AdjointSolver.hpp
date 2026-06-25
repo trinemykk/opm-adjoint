@@ -55,6 +55,9 @@
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
 
+#include <opm/material/densead/Evaluation.hpp>
+#include <opm/material/densead/Math.hpp>
+
 #include <opm/simulators/wells/StandardWell.hpp>
 
 #include <dune/common/fvector.hh>
@@ -87,6 +90,10 @@ public:
     static constexpr int numEq = getPropValue<TypeTag, Properties::NumEq>();
 
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
+    //! \brief One-derivative AD type: the parameter seed for exact, one-pass
+    //!        dR/dθ (Step 3). The state is taken as scalar values, so the
+    //!        single derivative slot carries only the parameter sensitivity.
+    using PEval = DenseAd::Evaluation<Scalar, 1>;
     using Replay = AdjointReplay<TypeTag>;
     using BdiagBlock = typename Replay::BdiagBlock;
     using Matrix = std::remove_cvref_t<
@@ -136,10 +143,12 @@ public:
             OpmLog::info("Adjoint end-point gradients enabled for " +
                          endpointSpec);
         }
-        generalGradients_ = (config_.gradientMethod == "general");
+        generalAd_ = (config_.gradientMethod == "general-ad");
+        generalGradients_ = (config_.gradientMethod == "general") || generalAd_;
         if (generalGradients_) {
-            OpmLog::info("Adjoint gradients: general (stencil-local "
-                         "re-evaluation of the residual)");
+            OpmLog::info(fmt::format(
+                "Adjoint gradients: general (stencil-local re-evaluation, {})",
+                generalAd_ ? "seeded AD, one pass" : "finite difference"));
         }
     }
 
@@ -248,7 +257,9 @@ public:
 
             t0 = tick();
             computeWellAdjoints_(k, step.dt, lambda);
-            if (generalGradients_) {
+            if (generalAd_) {
+                accumulateGeneralGradientsAD_(step.dt, lambda);
+            } else if (generalGradients_) {
                 accumulateGeneralGradients_(step.dt, lambda);
             } else {
                 accumulateGradients_(step.dt, lambda);
@@ -509,6 +520,161 @@ private:
         accumulatePvGeneral_(dt, lambda);
         accumulateTransGeneral_(dt, lambda);
         accumulatePermGeneral_(dt, lambda);
+    }
+
+    //! \brief General parameter gradients via seeded AD: the parameter is a
+    //!        one-derivative Evaluation (value 1, derivative 1), so a single
+    //!        residual evaluation yields the exact dR/dθ in res.derivative(0)
+    //!        - no finite-difference step. Same stencils and contraction as
+    //!        the FD path; reproduces the analytic gradient to ~machine
+    //!        precision (PV/trans are linear, perm carries the exact
+    //!        harmonic-mean derivative).
+    void accumulateGeneralGradientsAD_(double dt, const Vector& lambda)
+    {
+        accumulatePvAD_(dt, lambda);
+        accumulateTransAD_(dt, lambda);
+        accumulatePermAD_(dt, lambda);
+    }
+
+    //! \brief A seeded one-derivative scale (value 1, d/dθ = 1).
+    static PEval seed_()
+    {
+        PEval s(Scalar(1));
+        s.setDerivative(0, Scalar(1));
+        return s;
+    }
+
+    //! \brief AD PV perturbation: seeded pv multiplier on one cell.
+    struct PvPerturbAD
+    {
+        unsigned cell;
+        PEval s;
+        PEval pvScale(unsigned c) const { return c == cell ? s : PEval(Scalar(1)); }
+        PEval transScale(unsigned, unsigned) const { return PEval(Scalar(1)); }
+    };
+
+    //! \brief AD trans perturbation: seeded multiplier on one face.
+    struct TransPerturbAD
+    {
+        unsigned ci;
+        unsigned cj;
+        PEval s;
+        PEval pvScale(unsigned) const { return PEval(Scalar(1)); }
+        PEval transScale(unsigned i, unsigned j) const
+        {
+            return ((i == ci && j == cj) || (i == cj && j == ci))
+                ? s : PEval(Scalar(1));
+        }
+    };
+
+    //! \brief AD perm perturbation: the trans scale of each affected face is
+    //!        the harmonic-mean function of the seeded directional-perm
+    //!        factor s, so its derivative is exact (no FD truncation).
+    struct PermPerturbAD
+    {
+        struct FaceHt { unsigned a; unsigned b; Scalar hc; Scalar ho; };
+        std::vector<FaceHt> faces; // hc = half-trans of the perturbed cell
+        PEval s;
+        PEval pvScale(unsigned) const { return PEval(Scalar(1)); }
+        PEval transScale(unsigned i, unsigned j) const
+        {
+            const unsigned a = i < j ? i : j;
+            const unsigned b = i < j ? j : i;
+            for (const auto& f : faces) {
+                if (f.a == a && f.b == b) {
+                    const PEval tNew = (s * f.hc) * f.ho / (s * f.hc + f.ho);
+                    const Scalar tOld = f.hc * f.ho / (f.hc + f.ho);
+                    return tNew / tOld;
+                }
+            }
+            return PEval(Scalar(1));
+        }
+    };
+
+    void accumulatePvAD_(double /*dt*/, const Vector& lambda)
+    {
+        const std::size_t numCells = simulator_.model().numGridDof();
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        Dune::FieldVector<PEval, numEq> res;
+        for (std::size_t i = 0; i < numCells; ++i) {
+            const PvPerturbAD p{static_cast<unsigned>(i), seed_()};
+            evaluator.evalCellResidualReservoir(static_cast<unsigned>(i), p, res);
+            Scalar g = 0.0;
+            for (int eq = 0; eq < numEq; ++eq) {
+                g += lambda[i][eq] * res[eq].derivative(0);
+            }
+            gradientPv_[i] += g;
+        }
+    }
+
+    void accumulateTransAD_(double /*dt*/, const Vector& lambda)
+    {
+        ensureFaces_();
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        Dune::FieldVector<PEval, numEq> resI, resJ;
+        for (std::size_t f = 0; f < faces_.size(); ++f) {
+            const unsigned globI = static_cast<unsigned>(faces_[f].first);
+            const unsigned globJ = faces_[f].second;
+            const TransPerturbAD p{globI, globJ, seed_()};
+            evaluator.evalCellResidualReservoir(globI, p, resI);
+            evaluator.evalCellResidualReservoir(globJ, p, resJ);
+            Scalar g = 0.0;
+            for (int eq = 0; eq < numEq; ++eq) {
+                g += lambda[globI][eq] * resI[eq].derivative(0) +
+                     lambda[globJ][eq] * resJ[eq].derivative(0);
+            }
+            gradientTrans_[f] += g;
+        }
+    }
+
+    void accumulatePermAD_(double /*dt*/, const Vector& lambda)
+    {
+        ensureCellIncident_();
+        const auto& trans = simulator_.problem().eclTransmissibilities();
+        const std::size_t numCells = simulator_.model().numGridDof();
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        Dune::FieldVector<PEval, numEq> res;
+        for (std::size_t c = 0; c < numCells; ++c) {
+            if (!parallel_.interior(c)) {
+                continue;
+            }
+            for (int dim = 0; dim < 3; ++dim) {
+                const Scalar kc = trans.permeability(c)[dim][dim];
+                if (kc <= 0.0) {
+                    continue;
+                }
+                PermPerturbAD p;
+                p.s = seed_();
+                std::vector<unsigned> stencil{static_cast<unsigned>(c)};
+                for (const auto& inc : cellIncident_[c]) {
+                    if (inc.dim != dim) {
+                        continue;
+                    }
+                    const Scalar hc = trans.halfTransmissibility(
+                        static_cast<unsigned>(c), inc.neighbor);
+                    const Scalar ho = trans.halfTransmissibility(
+                        inc.neighbor, static_cast<unsigned>(c));
+                    if (hc <= 0.0 || hc + ho <= 0.0) {
+                        continue;
+                    }
+                    const unsigned a = std::min<unsigned>(c, inc.neighbor);
+                    const unsigned b = std::max<unsigned>(c, inc.neighbor);
+                    p.faces.push_back({a, b, hc, ho});
+                    stencil.push_back(inc.neighbor);
+                }
+                if (p.faces.empty()) {
+                    continue;
+                }
+                Scalar gd = 0.0;
+                for (const unsigned k : stencil) {
+                    evaluator.evalCellResidualReservoir(k, p, res);
+                    for (int eq = 0; eq < numEq; ++eq) {
+                        gd += lambda[k][eq] * res[eq].derivative(0);
+                    }
+                }
+                gradientPermGeneral_[c][dim] += gd / kc;
+            }
+        }
     }
 
     //! \brief PV-multiplier gradient, analytic: dR_i/dpvmult_i =
@@ -1117,6 +1283,7 @@ private:
     std::vector<const EndpointParamDef<Scalar>*> endpointDefs_;
     std::vector<std::vector<Scalar>> gradientEndpoints_;
     bool generalGradients_{false}; //!< use the stencil-local general mechanism
+    bool generalAd_{false};        //!< seeded AD (one pass) instead of FD
     std::vector<std::array<Scalar, 3>> gradientPermGeneral_; //!< general dJ/dK
     std::vector<std::vector<IncidentFace>> cellIncident_; //!< per-cell faces+dir
     Timing timing_;
