@@ -117,6 +117,11 @@ if(HAVE_OPM_TESTS)
       COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG pv
               ${_testout}/dirderiv_pv)
+    # General gradient vs analytic oracle (PV, TRANS, PERM) on one deck.
+    add_test(NAME adjoint_general_oracle_m1d
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
+              ${_testout}/general_oracle_m1d)
     add_test(NAME adjoint_fd_trans
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-trans-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
@@ -156,6 +161,10 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-residual-eval-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/reseval_spe1)
+    add_test(NAME adjoint_general_oracle_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/general_oracle_spe1)
     add_test(NAME adjoint_matchref_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
               $<TARGET_FILE:flow_adjoint>

@@ -506,7 +506,7 @@ private:
     void accumulateGeneralGradients_(double dt, const Vector& lambda)
     {
         accumulatePvGeneral_(dt, lambda);
-        accumulateTransAnalytic_(dt, lambda); // general trans: next increment
+        accumulateTransGeneral_(dt, lambda);
     }
 
     //! \brief PV-multiplier gradient, analytic: dR_i/dpvmult_i =
@@ -570,6 +570,76 @@ private:
         }
     }
 
+    //! \brief Build the local face list (I < J) and size gradientTrans_ on
+    //!        first use. In parallel a face shared with another rank is owned
+    //!        by exactly one rank (ownsFace), so the gathered global trans
+    //!        gradient counts each face once.
+    void ensureFaces_()
+    {
+        if (!gradientTrans_.empty()) {
+            return;
+        }
+        auto& model = simulator_.model();
+        const std::size_t numCells = model.numGridDof();
+        const auto& neighborInfo = model.linearizer().getNeighborInfo();
+        for (std::size_t globI = 0; globI < numCells; ++globI) {
+            for (const auto& nbInfo : neighborInfo[globI]) {
+                if (nbInfo.neighbor > globI) {
+                    faces_.push_back({globI, nbInfo.neighbor});
+                    faceDirs_.push_back(nbInfo.res_nbinfo.faceDir);
+                    ownedFace_.push_back(
+                        parallel_.ownsFace(globI, nbInfo.neighbor));
+                }
+            }
+        }
+        gradientTrans_.assign(faces_.size(), 0.0);
+    }
+
+    //! \brief Trans-multiplier perturbation: scales the trans of one face
+    //!        (I,J). dJ/dtmult_f touches only R_I and R_J, so the stencil is
+    //!        {I, J}.
+    struct TransPerturb
+    {
+        unsigned ci;
+        unsigned cj;
+        Scalar scale;
+        Scalar pvScale(unsigned) const { return Scalar(1); }
+        Scalar transScale(unsigned i, unsigned j) const
+        {
+            return ((i == ci && j == cj) || (i == cj && j == ci)) ? scale
+                                                                   : Scalar(1);
+        }
+    };
+
+    //! \brief Trans-multiplier gradient, general: central-difference R_I and
+    //!        R_J w.r.t. the face multiplier via the residual evaluator and
+    //!        contract with lambda_I, lambda_J. Matches the analytic value
+    //!        (TPFA flux is linear in trans).
+    void accumulateTransGeneral_(double /*dt*/, const Vector& lambda)
+    {
+        ensureFaces_();
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
+        const Scalar h = 1e-7;
+        EqVec rIp(0.0), rIm(0.0), rJp(0.0), rJm(0.0);
+        for (std::size_t f = 0; f < faces_.size(); ++f) {
+            const unsigned globI = static_cast<unsigned>(faces_[f].first);
+            const unsigned globJ = faces_[f].second;
+            const TransPerturb plus{globI, globJ, Scalar(1) + h};
+            const TransPerturb minus{globI, globJ, Scalar(1) - h};
+            evaluator.evalCellResidualReservoir(globI, plus, rIp);
+            evaluator.evalCellResidualReservoir(globI, minus, rIm);
+            evaluator.evalCellResidualReservoir(globJ, plus, rJp);
+            evaluator.evalCellResidualReservoir(globJ, minus, rJm);
+            Scalar g = 0.0;
+            for (int eq = 0; eq < numEq; ++eq) {
+                g += (lambda[globI][eq] * (rIp[eq] - rIm[eq]) +
+                      lambda[globJ][eq] * (rJp[eq] - rJm[eq])) / (2.0 * h);
+            }
+            gradientTrans_[f] += g;
+        }
+    }
+
     //! \brief Transmissibility-multiplier gradient, analytic.
     void accumulateTransAnalytic_(double /*dt*/, const Vector& lambda)
     {
@@ -582,24 +652,7 @@ private:
         // re-evaluated at the converged state with the public TPFA
         // kernels, mirroring linearize_cell.
         const auto& neighborInfo = model.linearizer().getNeighborInfo();
-        if (gradientTrans_.empty()) {
-            // Local face list (I < J) built on first use. In parallel a
-            // face shared with another rank (interior-ghost) is owned by
-            // exactly one rank (ownsFace), so the gathered global trans
-            // gradient counts each face once.
-            for (std::size_t globI = 0; globI < numCells; ++globI) {
-                const auto& nbInfos = neighborInfo[globI];
-                for (const auto& nbInfo : nbInfos) {
-                    if (nbInfo.neighbor > globI) {
-                        faces_.push_back({globI, nbInfo.neighbor});
-                        faceDirs_.push_back(nbInfo.res_nbinfo.faceDir);
-                        ownedFace_.push_back(
-                            parallel_.ownsFace(globI, nbInfo.neighbor));
-                    }
-                }
-            }
-            gradientTrans_.assign(faces_.size(), 0.0);
-        }
+        ensureFaces_();
 
         std::size_t faceIdx = 0;
         for (std::size_t globI = 0; globI < numCells; ++globI) {
