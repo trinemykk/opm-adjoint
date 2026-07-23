@@ -172,23 +172,44 @@ independent ways:
    deviation is ε-flat to 5 sig-figs across ε 4e-2…1e-3 (a kink shrinks as
    ε→0). It is a *smooth* systematic error.
 
-**What it is (leading hypothesis, not yet root-caused).** With a bitwise
-Jacobian, a smooth error means the adjoint differentiates a slightly different
-function than forward J(θ) in the **well-coupling path**: it is confined to the
-ORAT period where BHP is a *free* primary variable, probes the Bhp column of
-`D⁻ᵀ` (a direction `rate:oil` — the control-eq-row direction — never
-exercises), routes entirely through the well (so it hits an arbitrary
-non-perforated cell via λ_res), and grows with free-gas evolution near the
-producer. Note the replay bitwise check verifies the **reservoir** Jacobian
-only; the well matrices D/B/C used by `computeWellAdjoints_` come from
-`assembleWellEqGivenControls` in replay and are **not** bitwise-verified — a
-DISGAS-dependent inconsistency there fits every symptom. m1d (also DISGAS+
-VAPOIL, ORAT producer) matches bhp×PV at 4e-9, but is 7 calm substeps with no
-strong gas evolution. **Next diagnostic (task W1, reframed):** add a well-matrix
-(D/B/C) bitwise check to replay and compare forward vs replay for a DISGAS
-producer; expect the discrepancy to surface there. Until resolved, prefer
-`matchref` rate objectives for HM (oil ≲0.5 %, gas ~1.5 %); `bhp:` carries the
-documented caveat.
+**Confirmed genuine, not noise.** The 2.94 % single-cell deviation is identical
+under forward `cnv=1e-11, mb=1e-13` and adjoint linear reduction 1e-14 **and**
+1e-16 — so it is a real Jacobian/matrix inexactness, not convergence or
+linear-solve noise. (Strict tolerances are mandatory when FD-testing the
+adjoint — see the strict-tolerance memory.)
+
+**Coverage gap that let it hide.** Every per-cell FD gradient test (pv, perm,
+**wellctrl**) runs only on MODEL_1D_DEBUG (3 cells, 7 calm substeps); SPE1 has
+replay/Jacobian-eval tests but **no FD gradient test**. So a well-objective
+gradient in a gas-evolving regime was never FD-checked. m1d (also DISGAS+VAPOIL,
+ORAT producer) matches bhp×PV at 4e-9 because it never evolves significant free
+gas.
+
+**Mechanism (leading, well-evidenced).** The forward Newton converges the well
+equations to R_w ≈ 0 regardless of whether the assembled well Jacobian (D/B/C)
+is the *exact* linearization — Newton tolerates an inexact Jacobian. The adjoint
+instead applies `D⁻ᵀ` / `Bᵀ` to a **nonzero** RHS (`dJ/dxw = dt·e_bhp` for the
+bhp objective), so any inexactness in the well Jacobian that the forward's
+near-zero well residual never probes is exposed and amplified in the gradient.
+This explains every symptom: bhp-only (`pressure-average` has `dJ/dxw=0`;
+`rate:oil`'s `dJ/dxw` is the control-eq-row direction, which `D⁻ᵀ` maps to a
+trivial multiplier), ORAT-period-only (BHP a free variable), routes through the
+well so it hits any cell via λ_res, and grows with free-gas evolution — because
+the most likely inexact term is the **production perforation mobility
+derivative**: `getMobility` (WellInterface_impl.hpp:2131) takes the well-cell
+phase mobility `kr_p(S)/µ_p` at timeIdx=0 and maps its reservoir-cell AD
+derivatives into the well Evaluation via `extendEval`; `kr_p(S)` is strongly
+saturation-dependent for producers as gas evolves (injectors use total/injected
+mobility, so are insensitive — consistent with the injector being clean).
+
+**Next diagnostic (task W1).** FD-verify the assembled well Jacobian D and B
+against the well residual R_w at a converged substep (new well-matrix check,
+analogous to the reservoir `--adjoint-jacobian-eval-check`), isolating the
+mobility (`extendEval`/`dq/dS`) and well-index (`dq/d(CTF)`) columns. Expect the
+inexactness to surface in the mobility/saturation derivative. Until resolved,
+prefer `matchref` rate objectives for HM (oil ≲0.5 %, gas ~1.5 %); `bhp:`
+carries the documented caveat. A DISGAS well-objective FD test on SPE1 must be
+added to close the coverage gap.
 
 ### Multisegment wells — NOT supported for gradients (2026-07-23)
 
