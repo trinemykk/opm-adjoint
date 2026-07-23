@@ -189,6 +189,8 @@ inline void loadAdjointConfigFile(const std::string& path, AdjointConfig& config
         if (auto v = grad->get_optional<double>("fd_step"))   config.fdStep = *v;
         if (auto v = grad->get_optional<std::string>("endpoint_method"))
             config.endpointMethod = *v;
+        if (auto v = grad->get_optional<bool>("perm_well_term"))
+            config.permWellTerm = *v;
     }
     if (const auto sol = pt.get_child_optional("solver")) {
         if (auto v = sol->get_optional<std::string>("linear_solver"))

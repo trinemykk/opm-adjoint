@@ -60,6 +60,8 @@
 
 #include <opm/simulators/wells/StandardWell.hpp>
 
+#include <opm/input/eclipse/Schedule/Well/Connection.hpp>
+
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
 
 #include <dune/common/fvector.hh>
@@ -194,6 +196,7 @@ public:
 
         gradientPv_.assign(numCells, 0.0);
         gradientPermGeneral_.assign(numCells, {0.0, 0.0, 0.0});
+        gradientPermWell_.assign(numCells, {0.0, 0.0, 0.0});
 
         Vector lambda(numCells);
         Vector lambdaPrev(numCells);
@@ -270,6 +273,7 @@ public:
             } else {
                 accumulateGradients_(step.dt, lambda);
             }
+            accumulatePermWellTerm_(lambda);
             timing_.gradients += secs(t0, tick());
             t0 = tick();
             accumulateEndpointGradients_(step.dt, lambda);
@@ -1024,6 +1028,100 @@ private:
         return perforated;
     }
 
+    //! \brief Well-coupling permeability gradient (dCTF/dperm).
+    //!
+    //! At a defaulted-CTF perforation the connection transmissibility factor is
+    //! perm-derived (Peaceman), so dJ/dperm has a term through the well
+    //! equations that the cell-based (reservoir face) perm gradient omits.
+    //! Measured on SPE1 to be ~95 % of dJ/dK at the producer perforation.
+    //!
+    //! Mechanism: the CTF enters the reservoir source and the well residual
+    //! linearly (Tw = CTF*trans_mult, cq = -Tw*mob*drawdown). Perturbing the
+    //! well index (= CTF) and re-linearizing, the whole-domain contraction
+    //! lambda_r.R_r + lambda_w.R_w captures BOTH sides; central-differencing it
+    //! gives dC/d(ln CTF) = dJ/d(ln CTF). The chain to perm uses the dominant
+    //! Peaceman term Kh = sqrt(K_a K_b) h, so d(ln CTF)/dK_a = 1/(2 K_a) for the
+    //! two directions perpendicular to the connection (the weaker r0 dependence
+    //! is neglected in this v1). Explicit-CTF connections have dCTF/dK = 0 and
+    //! are skipped.
+    void accumulatePermWellTerm_(const Vector& lambda)
+    {
+        if (!config_.permWellTerm) {
+            return;
+        }
+        const auto& trans = simulator_.problem().eclTransmissibilities();
+        auto& wellModel = simulator_.problem().wellModel();
+        const Scalar h = config_.fdStep;
+        bool perturbed = false;
+
+        for (const auto& wellPtr : wellModel.localNonshutWells()) {
+            auto* stdWell = dynamic_cast<StandardWell<TypeTag>*>(wellPtr.get());
+            if (!stdWell) {
+                continue;
+            }
+            const auto& perfData = stdWell->perforationData();
+            const auto& conns = stdWell->wellEcl().getConnections();
+            const auto& cells = stdWell->cells();
+            auto& wellIndex = stdWell->wellIndex();
+
+            for (std::size_t perf = 0; perf < wellIndex.size(); ++perf) {
+                const int cell = cells[perf];
+                if (!parallel_.interior(cell)) {
+                    continue;
+                }
+                const auto& conn = conns[perfData[perf].ecl_index];
+                if (conn.kind() != Connection::CTFKind::Defaulted) {
+                    continue;  // explicit CTF: dCTF/dK = 0
+                }
+                const Scalar wi0 = wellIndex[perf];
+                if (!(wi0 > 0.0)) {
+                    continue;
+                }
+
+                wellIndex[perf] = wi0 * (Scalar{1} + h);
+                const Scalar cplus = endpointWholeContraction_(lambda);
+                wellIndex[perf] = wi0 * (Scalar{1} - h);
+                const Scalar cminus = endpointWholeContraction_(lambda);
+                wellIndex[perf] = wi0;
+                perturbed = true;
+
+                const Scalar dCdlnCtf = (cplus - cminus) / (2.0 * h);
+
+                // Directions perpendicular to the connection carry Kh.
+                int a, b;
+                switch (conn.dir()) {
+                case Connection::Direction::X: a = 1; b = 2; break;
+                case Connection::Direction::Y: a = 0; b = 2; break;
+                default:                       a = 0; b = 1; break;  // Z
+                }
+                const Scalar ka = trans.permeability(cell)[a][a];
+                const Scalar kb = trans.permeability(cell)[b][b];
+                if (ka > 0.0) {
+                    gradientPermWell_[cell][a] += dCdlnCtf / (2.0 * ka);
+                }
+                if (kb > 0.0) {
+                    gradientPermWell_[cell][b] += dCdlnCtf / (2.0 * kb);
+                }
+            }
+        }
+
+        if (perturbed) {
+            restoreConvergedLinearization_();
+        }
+    }
+
+    //! \brief Add the accumulated dCTF/dperm well term into a local per-cell
+    //!        permeability gradient (before the parallel gather).
+    void addPermWellTerm_(std::vector<std::array<Scalar, 3>>& gradient) const
+    {
+        for (std::size_t c = 0; c < gradient.size() &&
+                                c < gradientPermWell_.size(); ++c) {
+            for (int d = 0; d < 3; ++d) {
+                gradient[c][d] += gradientPermWell_[c][d];
+            }
+        }
+    }
+
     //! \brief IQ source returning a locally-rebuilt (perturbed) IQ for one
     //!        cell and the model cache for every other cell.
     struct EndpointOverrideIQ
@@ -1201,9 +1299,11 @@ private:
         // Permeability: the general method accumulates dJ/dK directly per
         // substep (gradientPermGeneral_); the analytic method post-processes
         // the accumulated trans gradient through the half-trans chain rule.
-        const auto permGathered = generalGradients_
-            ? gatherPermArray_(gradientPermGeneral_)
-            : gatherPermGradients_();
+        std::vector<std::array<Scalar, 3>> permLocal = generalGradients_
+            ? gradientPermGeneral_
+            : analyticPermLocalGradient_();
+        addPermWellTerm_(permLocal);  // dCTF/dperm at defaulted-CTF perforations
+        const auto permGathered = gatherPermArray_(permLocal);
 
         if (parallel_.rank() != 0) {
             return;
@@ -1315,7 +1415,9 @@ private:
     //! both sides since lambda is made consistent), so the gathered
     //! per-cell result is correct without ghost-row reduction; ghost-cell
     //! accumulations are dropped on gather.
-    std::vector<std::array<Scalar, 3>> gatherPermGradients_()
+    //! \brief Analytic dJ/dK (local, pre-gather): the accumulated trans
+    //!        gradient chain-ruled through the one-sided half-transmissibilities.
+    std::vector<std::array<Scalar, 3>> analyticPermLocalGradient_()
     {
         const auto& trans = simulator_.problem().eclTransmissibilities();
         const std::size_t numCells = simulator_.model().numGridDof();
@@ -1352,7 +1454,7 @@ private:
             }
         }
 
-        return gatherPermArray_(gradient);
+        return gradient;
     }
 
     //! \brief Gather a per-cell 3-vector field (one column per permeability
@@ -1401,6 +1503,7 @@ private:
     bool generalGradients_{false}; //!< use the stencil-local general mechanism
     bool generalAd_{false};        //!< seeded AD (one pass) instead of FD
     std::vector<std::array<Scalar, 3>> gradientPermGeneral_; //!< general dJ/dK
+    std::vector<std::array<Scalar, 3>> gradientPermWell_;    //!< dCTF/dK term
     std::vector<std::vector<IncidentFace>> cellIncident_; //!< per-cell faces+dir
     Timing timing_;
 };

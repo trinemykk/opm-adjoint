@@ -54,6 +54,7 @@ AdjointConfig AdjointConfig::fromParameters()
     override_(config.gradientMethod,   Parameters::AdjointGradientMethod{});
     override_(config.fdStep,           Parameters::AdjointFdStep{});
     override_(config.endpointMethod,   Parameters::AdjointEndpointMethod{});
+    override_(config.permWellTerm,     Parameters::AdjointPermWellTerm{});
     override_(config.endpoints,        Parameters::AdjointEndpoints{});
     override_(config.linearSolver,     Parameters::AdjointLinearSolver{});
     override_(config.linearSolverReduction,
@@ -132,6 +133,9 @@ void registerAdjointParameters()
         ("End-point gradient evaluation: 'whole' (full re-linearization per "
          "perturbation, default) or 'stencil' (stencil-local re-evaluation, "
          "~Ncells/7 x faster, whole-domain fallback for perforated cells)");
+    Parameters::Register<Parameters::AdjointPermWellTerm>
+        ("Include the dJ/dperm well-coupling term (dCTF/dK) at defaulted-CTF "
+         "perforations; default true, a no-op for explicit-CTF decks");
 }
 
 } // namespace Opm

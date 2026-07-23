@@ -109,6 +109,13 @@ struct AdjointGradientMethod { static constexpr auto value = "analytic"; };
 //!        'general-ad' path does not use it.
 struct AdjointFdStep { static constexpr double value = 1e-7; };
 
+//! \brief Include the dJ/dperm well-coupling term at defaulted-CTF
+//!        perforations (the connection transmissibility factor is
+//!        perm-derived, so the perm gradient has a well-equation
+//!        contribution the cell-based reservoir gradient omits). Default on;
+//!        a no-op for explicit-CTF decks.
+struct AdjointPermWellTerm { static constexpr bool value = true; };
+
 //! \brief How the end-point FD gradients evaluate the perturbed residual:
 //!        "whole" (full re-linearization per perturbation, the original
 //!        cell x Ncells method, default) or "stencil" (stencil-local
@@ -134,6 +141,7 @@ struct AdjointConfig
     std::string gradientMethod{"analytic"}; //!< "analytic" or "general"
     double fdStep{1e-7};      //!< central-difference step for FD gradients
     std::string endpointMethod{"whole"}; //!< endpoint FD: "whole" or "stencil"
+    bool permWellTerm{true};  //!< dCTF/dperm well-coupling term at perforations
     std::string objective{};  //!< objective specification (CLI string form)
     //! Structured objective from a JSON config; when set it takes precedence
     //! over the `objective` string (which cannot express per-term weights on

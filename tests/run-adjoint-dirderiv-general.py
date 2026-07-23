@@ -62,12 +62,11 @@ FAMILY = {
     #   by rewriting its array; the gradient (SI) maps to the multiplier basis
     #   as g_i * base_i * gscale.
     "pv":   dict(grad="ADJOINT_GRADIENTS_PV.txt",   gcol=0, kind="multpv"),
-    # PERM masks perforated cells: the cell-based perm gradient there is missing
-    # the dCTF/dK well term (defaulted CTF; task B1), so it is knowingly wrong at
-    # perforations. Masking them tests the RESERVOIR perm gradient (exact) at
-    # scale without depending on the B1 fix; drop the mask once B1 lands.
+    # PERM: B1 added the dCTF/dK well term, so the perm gradient is now correct
+    # at perforations too — no masking needed. (Set mask_perf=True to isolate the
+    # reservoir gradient if the well term is disabled via --adjoint-perm-well-term.)
     "perm": dict(grad="ADJOINT_GRADIENTS_PERM.txt", gcol=0, kind="array",
-                 keyword="PERMX", gscale=DARCY, mask_perf=True),
+                 keyword="PERMX", gscale=DARCY, mask_perf=False),
 }
 if family not in FAMILY:
     print(f"unsupported family '{family}' (have: {', '.join(FAMILY)})"); sys.exit(2)

@@ -220,6 +220,12 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-drsdt-crossterm-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/drsdt_crossterm_spe1)
+    # dCTF/dperm well-coupling term (B1): perm gradient at a defaulted-CTF
+    # perforation matches FD (was ~95% off without the well term).
+    add_test(NAME adjoint_fd_perm_well_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-perm-well-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1 ${_testout}/fd_perm_well_spe1)
     # Reservoir PERM gradient by directional FD on a real DISGAS deck (DRSDT
     # stripped, perforations masked, so it is independent of tasks #18 and B1).
     add_test(NAME adjoint_dirderiv_perm_spe1
