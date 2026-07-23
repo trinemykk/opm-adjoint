@@ -375,7 +375,9 @@ private:
 
         if (objective_.kind() == Kind::WellBhp) {
             // BHP is the last well primary variable.
-            dJdxw[numWellEq - 1] = objective_.bhpGradient(stdWell.name(), dt);
+            dJdxw[numWellEq - 1] =
+                objective_.bhpGradient(stdWell.name(), dt,
+                                       simulator_.time() + dt);
         } else if (objective_.kind() == Kind::RateTerms) {
             // q_c is a function of the well primary variables; its
             // derivatives sit in the well slots of the EvalWell returned

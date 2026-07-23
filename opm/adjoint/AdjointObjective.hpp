@@ -108,6 +108,9 @@ struct ObjectiveSpec
     ObjectiveKind kind{ObjectiveKind::PressureAverage};
     std::string wellName{};                //!< bhp objective (exact name)
     std::vector<ObjectiveTermSpec> terms;  //!< rate-family objectives
+    //! bhp objective window (rate terms carry their own)
+    double windowStartDays{-std::numeric_limits<double>::max()};
+    double windowEndDays{std::numeric_limits<double>::max()};
 
     static ObjectiveSpec parse(const std::string& spec);
 };
@@ -192,9 +195,21 @@ inline ObjectiveSpec ObjectiveSpec::parse(const std::string& specIn)
 
     if (spec.empty() || spec == "pressure-average") {
         result.kind = ObjectiveKind::PressureAverage;
+        if (windowExplicit || weight != 1.0) {
+            throw std::runtime_error(
+                "pressure-average is a final-substep objective; :w=/:t0=/:t1= "
+                "suffix tokens are not meaningful for it");
+        }
     } else if (spec.rfind("bhp:", 0) == 0) {
         result.kind = ObjectiveKind::WellBhp;
         result.wellName = spec.substr(4);
+        result.windowStartDays = t0;
+        result.windowEndDays = t1;
+        if (weight != 1.0) {
+            throw std::runtime_error(
+                "bhp objective does not support :w= (a single-term J scales "
+                "trivially)");
+        }
         if (result.wellName.empty()) {
             throw std::runtime_error(
                 "--adjoint-objective=bhp:<WELL> needs a well name");
@@ -311,6 +326,8 @@ public:
         kind_ = spec.kind;
         if (kind_ == Kind::WellBhp) {
             wellName_ = spec.wellName;
+            bhpWindowStartDays_ = spec.windowStartDays;
+            bhpWindowEndDays_ = spec.windowEndDays;
             if (!schedule.hasWell(wellName_)) {
                 OPM_THROW(std::runtime_error,
                           "Adjoint objective bhp: unknown well '" +
@@ -388,6 +405,9 @@ public:
             return sum / solution.size();
         }
         case Kind::WellBhp: {
+            if (!bhpInWindow_(simulator.time() + dt)) {
+                return 0.0;
+            }
             const auto& wellState =
                 simulator.problem().wellModel().wellState();
             return dt * wellState.well(wellName_).bhp;
@@ -438,10 +458,12 @@ public:
     void setParallel(const AdjointParallel<TypeTag>* par)
     { par_ = par; }
 
-    //! \brief dJ_k/d(bhp of \p well) for the bhp objective.
-    Scalar bhpGradient(const std::string& well, double dt) const
+    //! \brief dJ_k/d(bhp of \p well) for the bhp objective; \p tEnd is the
+    //!        substep end time [s] (window check).
+    Scalar bhpGradient(const std::string& well, double dt, Scalar tEnd) const
     {
-        if (kind_ == Kind::WellBhp && well == wellName_) {
+        if (kind_ == Kind::WellBhp && well == wellName_ &&
+            bhpInWindow_(tEnd)) {
             return dt;
         }
         return 0.0;
@@ -488,6 +510,13 @@ private:
         }
         }
         return 0.0;
+    }
+
+    bool bhpInWindow_(Scalar tEnd) const
+    {
+        const Scalar tEndDays = tEnd / 86400.0;
+        return tEndDays >= bhpWindowStartDays_ &&
+               tEndDays <= bhpWindowEndDays_;
     }
 
     //! \brief Window check on the substep end time \p tEnd [s]. MatchRef
@@ -666,6 +695,8 @@ private:
 
     Kind kind_{Kind::PressureAverage};
     std::string wellName_{};           //!< bhp objective
+    Scalar bhpWindowStartDays_{-std::numeric_limits<Scalar>::max()};
+    Scalar bhpWindowEndDays_{std::numeric_limits<Scalar>::max()};
     std::vector<RateTerm> terms_;      //!< rate-family objectives
     mutable std::vector<Scalar> termValues_;  //!< per-term J accumulators
     const AdjointParallel<TypeTag>* par_{nullptr};

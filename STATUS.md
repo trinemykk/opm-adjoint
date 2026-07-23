@@ -145,6 +145,45 @@ decks there is an additional ~4–6 % systematic FD-vs-adjoint deviation on all
 cells (control-switch kinks, the documented v1 approximation) — visible with
 `bhp:PROD`, absent with `pressure-average`.
 
+### Well-objective gradient deviation QUANTIFIED (2026-07-23): the neglected
+### cross-step well explicit-quantities term is the cause — up to ~9 %
+
+Random-direction test (all 300 PORO multipliers, fixed seed, FD (J+−J−)/2ε vs
+adjoint g·d, SPE1CASE1, ε-stable at 1e-3/1e-2 → real, not FD noise):
+
+| objective (window in days) | rel. deviation | note |
+|---|---|---|
+| `bhp:PROD` t∈[1100,∞) — BHP-controlled period | **0 (exact)** | BHP pinned ⇒ both sides zero |
+| `bhp:PROD` t∈[0,100] | 0.8 % | short window, small depletion |
+| `bhp:PROD` t∈[0,300] | 7.9 % | grows with trajectory length |
+| `bhp:PROD` t∈[0,900] — pure ORAT, no switch | **8.8 %** | worse than full run ⇒ NOT switch kinks |
+| `bhp:PROD` full run | 6.1 % | |
+| `rate:PROD:gas` t∈[0,900] | 1.5 % | |
+| `rate:PROD:oil` (both windows) | 0.1–0.5 % | rate pinned in ORAT period |
+
+**Control-switch kinks are NOT the cause** (a switch happens exactly when the
+constraint is hit, so BHP/rates are continuous — J is C1 there; confirmed by
+the pure-mode windows). The cause is the already-warned `[approx-gradient]
+well explicit quantities` item: `calculateExplicitQuantities` (first Newton
+iteration of every substep, `StandardWell_impl.hpp:1444`) freezes connection
+hydrostatic pressure drops / wellbore-storage `F0` / explicit B-factors
+computed from `(x_{k-1}, xw_{k-1})`, so `R_w(x_k, xw_k; E(x_{k-1}, xw_{k-1}))`
+— and the backward recursion's cross-substep coupling (Bdiag) carries only the
+reservoir storage block, not `dR_w(k)/d(x_{k-1}, xw_{k-1})` through E. The
+magnitude was never known; it is **material for BHP objectives (~6–9 %) and
+noticeable for gas-rate matching (~1.5 %)** on a depleting DISGAS deck.
+
+Fix sketch (planned as stage **W1**): during the sweep at substep k, per well
+and perforation, perturb the connection cell's `x_{k-1}` components (and the
+well's `xw_{k-1}`), rebuild E + the well residual (connection-cell IQ rebuild
+via the public `update()` — the endpoint-stencil machinery), contract with
+`λ_w(k)`, and add the result to the substep-(k-1) adjoint RHS (reservoir rows)
+and to the k-1 well elimination (well rows). Cost per substep: per well,
+numPerf×numEq (+numWellEq) small FD assemblies — cheap for StandardWells;
+AD-seeded later. Until then `bhp:` objectives should be used with the
+documented caveat; rate-matching (`matchref`) objectives are the least
+affected (oil ≲0.5 %, gas ~1.5 % on SPE1).
+
 ### Known gaps / queue (low priority, none blocking)
 
 - Report-step-0 startup bitwise for model2-like decks; Norne hysteresis / well-event
