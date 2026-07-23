@@ -141,9 +141,9 @@ public:
 
     void applyscaleadd(field_type alpha, const Vector& x, Vector& y) const override
     {
-        Vector tmp(y);
-        apply(x, tmp);
-        y.axpy(alpha, tmp);
+        tmp_.resize(y.size());
+        apply(x, tmp_);
+        y.axpy(alpha, tmp_);
     }
 
     const Matrix& getmat() const override
@@ -192,6 +192,7 @@ private:
     const Matrix& transpose_;
     const Comm& comm_;
     std::size_t interiorSize_;
+    mutable Vector tmp_; //!< applyscaleadd scratch (avoid per-call alloc)
 };
 #endif // HAVE_MPI
 
@@ -317,9 +318,12 @@ private:
     void solveDirect_(const Matrix& matrix, Vector& rhs, Vector& solution)
     {
 #if HAVE_SUITESPARSE_UMFPACK
-        const auto transposed = transposeBlockMatrix(matrix);
+        // Pattern is constant across the sweep: values-only refill after
+        // the first solve.
+        transposeBlockMatrixInto(matrix, cachedDirectTranspose_);
 
-        Dune::UMFPack<TransposedMatrix<Matrix>> solver(transposed, /*verbose=*/0);
+        Dune::UMFPack<TransposedMatrix<Matrix>> solver(cachedDirectTranspose_,
+                                                       /*verbose=*/0);
         Dune::InverseOperatorResult result;
         solver.apply(solution, rhs, result);
 
@@ -369,7 +373,8 @@ private:
     void solveSerial_(const Matrix& matrix, Vector& rhs, Vector& solution,
                       Dune::InverseOperatorResult& result)
     {
-        Matrix transposed = transposeBlockMatrixSameType(matrix);
+        transposeBlockMatrixInto(matrix, cachedTranspose_);
+        const Matrix& transposed = cachedTranspose_;
 
         std::function<Vector()> weightsCalculator;
         if (usesCprWeights_) {
@@ -402,7 +407,8 @@ private:
     {
         using Comm = Dune::OwnerOverlapCopyCommunication<int, int>;
 
-        Matrix transposed = transposeBlockMatrixSameType(matrix);
+        transposeBlockMatrixInto(matrix, cachedTranspose_);
+        Matrix& transposed = cachedTranspose_;
         invalidateRows_(transposed, *overlapRows_);  // overlap rows -> identity
         for (const int row : *overlapRows_) {
             rhs[row] = 0.0;
@@ -439,6 +445,13 @@ private:
             matrix[row][row] = identity;
         }
     }
+
+    // Cached transposes: the sparsity pattern is constant across the
+    // backward sweep, so after the first solve only values are refilled.
+#if HAVE_SUITESPARSE_UMFPACK
+    TransposedMatrix<Matrix> cachedDirectTranspose_;
+#endif
+    Matrix cachedTranspose_;
 
     std::string spec_{"umfpack"};
     PropertyTree prm_{};

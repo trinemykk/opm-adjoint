@@ -104,6 +104,35 @@ TransposedMatrix<Matrix> transposeBlockMatrix(const Matrix& matrix)
     return transposeBlockMatrixTo<TransposedMatrix<Matrix>>(matrix);
 }
 
+//! \brief Transpose into an existing target, reusing its sparsity when it
+//!        already holds the transposed pattern (values-only refill).
+//!
+//! The adjoint solves one transposed system per substep with a CONSTANT
+//! sparsity pattern (the linearizer builds its neighbour structure once),
+//! so the structural pass and allocation of a fresh transpose per solve
+//! are wasted after the first. Falls back to a full rebuild when the
+//! target does not match (dimensions or nonzero count differ).
+template<class OutMatrix, class Matrix>
+void transposeBlockMatrixInto(const Matrix& matrix, OutMatrix& target)
+{
+    if (target.N() != matrix.M() || target.M() != matrix.N() ||
+        target.nonzeroes() != matrix.nonzeroes()) {
+        target = transposeBlockMatrixTo<OutMatrix>(matrix);
+        return;
+    }
+    for (auto row = matrix.begin(); row != matrix.end(); ++row) {
+        for (auto entry = row->begin(); entry != row->end(); ++entry) {
+            auto& to = target[entry.index()][row.index()];
+            const auto& from = *entry;
+            for (std::size_t i = 0; i < Matrix::block_type::cols; ++i) {
+                for (std::size_t j = 0; j < Matrix::block_type::rows; ++j) {
+                    to[i][j] = from[j][i];
+                }
+            }
+        }
+    }
+}
+
 //! \brief Transpose preserving the source matrix type (for the iterative
 //!        path: FlexibleSolver/PreconditionerFactory are pre-instantiated
 //!        in opm-simulators for Opm::MatrixBlock-blocked BCRS).
