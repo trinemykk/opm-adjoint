@@ -114,6 +114,26 @@ Objectives are assembled separately in
 - Gradient accuracy tracks the linear-solve reduction roughly linearly; default
   reduction `1e-14`.
 
+### dCTF/dK quantified (2026-07-23) — the well term is DOMINANT at producers
+
+`tests/run-adjoint-ctf-gap-quantify.sh` (SPE1CASE1, defaulted CTF, single-cell
+PERMX multiplier FD vs adjoint `general-ad`, h=1e-2, cnv 1e-9):
+
+| cell | objective | FD dJ/dK [/mD] | adjoint | missing well term |
+|---|---|---|---|---|
+| PROD perf (10,10,3) | pressure-average | −3.220e4 | −1.433e3 | **95.6 % of FD** |
+| INJ perf (1,1,1) | pressure-average | −3.429e1 | −3.406e1 | 0.7 % |
+| unperforated (5,5,2) | pressure-average | 6.800e1 | 6.811e1 | −0.2 % (noise) |
+
+Same picture with `bhp:PROD` (prod-perf gap 94.3 %). **Decision: the well-row
+perm term (λ·dR/dCTF·dCTF/dK) is mandatory for perm history matching** — at
+drawdown-limited producer perforations the cell-based perm gradient is ~20×
+too small. It is negligible for rate-controlled injectors (delivery not
+CTF-limited). Secondary observation: with well objectives on mode-switching
+decks there is an additional ~4–6 % systematic FD-vs-adjoint deviation on all
+cells (control-switch kinks, the documented v1 approximation) — visible with
+`bhp:PROD`, absent with `pressure-average`.
+
 ### Known gaps / queue (low priority, none blocking)
 
 - Report-step-0 startup bitwise for model2-like decks; Norne hysteresis / well-event
