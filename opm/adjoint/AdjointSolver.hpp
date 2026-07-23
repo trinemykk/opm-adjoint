@@ -1189,7 +1189,11 @@ private:
             os.precision(16);
             os << "# dJ/d(active control target) per well, summed over all "
                   "substeps; SI units (rate targets: per m3/s, bhp targets: "
-                  "per Pa)\n";
+                  "per Pa)\n"
+                  "# DEPRECATED for wells that switch control mode during the "
+                  "run: this total then sums derivatives w.r.t. DIFFERENT "
+                  "targets (e.g. a BHP and an ORAT target) into one number. "
+                  "Use ADJOINT_GRADIENTS_WELLCTRL_BYMODE.txt instead.\n";
             for (const auto& line : wellCtrlLines) {
                 os << line << "\n";
             }
@@ -1202,7 +1206,11 @@ private:
             os.precision(16);
             os << "# well mode dJ/d(target): derivative w.r.t. each active "
                   "control mode's target, accumulated over the substeps where "
-                  "it was binding; SI units (rate: per m3/s, bhp: per Pa)\n";
+                  "it was binding; SI units (rate: per m3/s, bhp: per Pa)\n"
+                  "# NOTE: mode GRUP means the well followed a group-derived "
+                  "target; the value is then the derivative w.r.t. that "
+                  "EFFECTIVE per-well target, not w.r.t. the group keyword "
+                  "item.\n";
             for (const auto& line : wellCtrlByModeLines) {
                 os << line << "\n";
             }

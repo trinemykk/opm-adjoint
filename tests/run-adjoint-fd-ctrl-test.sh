@@ -63,6 +63,31 @@ CTRLFILE=${BASE}/${DECKNAME}.ADJOINT_GRADIENTS_WELLCTRL.txt
 ADJ_SI=$(awk '$1 == "Prod" {print $2}' "${CTRLFILE}")
 echo "adjoint dJ/du (SI) for Prod: ${ADJ_SI}"
 
+# Consistency: the per-mode breakdown must sum back to the lumped total
+# for every well (catches bookkeeping regressions in the mode tagging).
+BYMODE=${BASE}/${DECKNAME}.ADJOINT_GRADIENTS_WELLCTRL_BYMODE.txt
+[ -f "${BYMODE}" ] || { echo "no per-mode control-gradient file"; exit 1; }
+python3 - "${CTRLFILE}" "${BYMODE}" << 'EOF' || exit 1
+import sys
+def rows(p, ncols):
+    out = []
+    for ln in open(p):
+        s = ln.strip()
+        if s and not s.startswith('#'):
+            out.append(s.split())
+    return out
+total = {w: float(v) for w, v in rows(sys.argv[1], 2)}
+bymode = {}
+for w, m, v in rows(sys.argv[2], 3):
+    bymode[w] = bymode.get(w, 0.0) + float(v)
+for w, t in total.items():
+    s = bymode.get(w, 0.0)
+    if abs(s - t) > 1e-8 * max(abs(t), 1.0):
+        print(f"BYMODE consistency FAIL for {w}: sum {s} != total {t}")
+        sys.exit(1)
+print("BYMODE consistency: per-mode sums match the lumped totals")
+EOF
+
 echo "=== FD of the ORAT target"
 for sign in + -; do
     U=$(python3 -c "print(repr(${URATE} ${sign} ${DELTA}))")
