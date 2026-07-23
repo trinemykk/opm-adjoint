@@ -149,8 +149,10 @@ private:
                             "--enable-storage-cache=false for exact replay.");
         }
         if (simulator_.gridView().comm().size() > 1) {
-            OpmLog::warning("Adjoint recording: running with more than one MPI "
-                            "process is untested; replay is serial-first.");
+            OpmLog::info("Adjoint recording: parallel run - the archive is "
+                         "written per rank, so replay/gradient runs must use "
+                         "the same number of MPI processes (and the same "
+                         "partitioning).");
         }
         if (Parameters::Get<Parameters::ThreadsPerProcess>() > 1) {
             OpmLog::warning("Adjoint recording: more than one thread per process "

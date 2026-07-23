@@ -152,15 +152,6 @@ public:
         }
     }
 
-    //! \brief Null perturbation: every scale is 1 (used for the value pass
-    //!        and as the base class of family perturbations).
-    struct NoPerturb
-    {
-        Scalar pvScale(unsigned /*cell*/) const { return Scalar(1.0); }
-        Scalar transScale(unsigned /*i*/, unsigned /*j*/) const
-        { return Scalar(1.0); }
-    };
-
     //! \brief Reservoir residual of one cell (flux + storage only, NO
     //!        source) with a parameter perturbation applied to the
     //!        transmissibility (flux term) and the pore-volume multiplier
