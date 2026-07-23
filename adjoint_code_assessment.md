@@ -26,6 +26,18 @@ proven default. No confirmed wrong-result bug was found in the tested configurat
 findings below are **latent defects, robustness gaps, and improvement opportunities**,
 ranked.
 
+> **Status update (same day):** the findings below have been acted on —
+> F1 `27ee860`, F3+F5 `f5c45e0`, F6 `fccc75c`/`b0432b6`, F2 `faed6f9` (deprecation
+> note + BYMODE-sum consistency check; the multi-mode FD test remains open),
+> F4 `559aadc` (`--adjoint-fd-step`), F7's warning promotion `c616f50`
+> (fires on SPE1's defaulted CTF, silent on m1d's explicit CTF), and the P1
+> improvement `80abce6` (stencil-local endpoint gradients,
+> `--adjoint-endpoint-method=stencil`: FD-verified, 4.9e-11 vs whole on SPE1,
+> endpoint phase 14.58 s → 0.26 s = 56×; default stays `whole` per policy).
+> Still open: multi-mode WELLCTRL FD test, P2 face-targeted evaluations,
+> UMFPACK factorization reuse, FD/AD struct unification, and the F7 catalog
+> items (WGRUPCON Stage-2, endpoint well-row exact term, upstream endpoint AD).
+
 ## 2. Findings — possible errors (ranked by risk)
 
 ### F1. `TransposedParallelOperator::scatterTransposed_` can iterate past `end()` (latent UB)
