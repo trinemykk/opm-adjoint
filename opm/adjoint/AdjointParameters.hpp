@@ -27,9 +27,18 @@
 #ifndef OPM_ADJOINT_PARAMETERS_HPP
 #define OPM_ADJOINT_PARAMETERS_HPP
 
+#include <opm/adjoint/AdjointObjectiveSpec.hpp>
+
+#include <optional>
 #include <string>
 
 namespace Opm::Parameters {
+
+//! \brief Path to a JSON configuration file (--adjoint-config). It provides
+//!        base values for the adjoint settings and a structured objective
+//!        (weights/windows/wildcards); any --adjoint-* flag set explicitly on
+//!        the command line overrides its JSON counterpart. Empty disables.
+struct AdjointConfig { static constexpr auto value = ""; };
 
 //! \brief Record per-substep simulation state for later adjoint/replay runs.
 struct AdjointSave { static constexpr bool value = false; };
@@ -125,7 +134,11 @@ struct AdjointConfig
     std::string gradientMethod{"analytic"}; //!< "analytic" or "general"
     double fdStep{1e-7};      //!< central-difference step for FD gradients
     std::string endpointMethod{"whole"}; //!< endpoint FD: "whole" or "stencil"
-    std::string objective{};  //!< objective specification
+    std::string objective{};  //!< objective specification (CLI string form)
+    //! Structured objective from a JSON config; when set it takes precedence
+    //! over the `objective` string (which cannot express per-term weights on
+    //! mixed families). Empty => parse `objective`.
+    std::optional<Adjoint::ObjectiveSpec> objectiveSpec{};
     std::string endpoints{};  //!< end-point parameter list
     std::string linearSolver{};  //!< adjoint linear solver spec
     double linearSolverReduction{1e-14};

@@ -19,6 +19,7 @@
 
 #include <config.h>
 #include <opm/adjoint/AdjointParameters.hpp>
+#include <opm/adjoint/AdjointConfigFile.hpp>
 
 #include <opm/models/utils/parametersystem.hpp>
 
@@ -27,30 +28,59 @@ namespace Opm {
 AdjointConfig AdjointConfig::fromParameters()
 {
     AdjointConfig config;
-    config.save = Parameters::Get<Parameters::AdjointSave>();
-    config.mode = Parameters::Get<Parameters::AdjointMode>();
-    config.saveSystem = Parameters::Get<Parameters::AdjointSaveSystem>();
-    config.path = Parameters::Get<Parameters::AdjointFile>();
-    config.replayTolerance = Parameters::Get<Parameters::AdjointReplayTolerance>();
-    config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
-    config.residualEvalCheck = Parameters::Get<Parameters::AdjointResidualEvalCheck>();
-    config.gradientMethod = Parameters::Get<Parameters::AdjointGradientMethod>();
-    config.fdStep = Parameters::Get<Parameters::AdjointFdStep>();
-    config.endpointMethod = Parameters::Get<Parameters::AdjointEndpointMethod>();
-    config.objective = Parameters::Get<Parameters::AdjointObjective>();
-    config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
-    config.linearSolver = Parameters::Get<Parameters::AdjointLinearSolver>();
-    config.linearSolverReduction =
-        Parameters::Get<Parameters::AdjointLinearSolverReduction>();
-    config.linearSolverMaxIter =
-        Parameters::Get<Parameters::AdjointLinearSolverMaxIter>();
-    config.linearSolverVerbosity =
-        Parameters::Get<Parameters::AdjointLinearSolverVerbosity>();
+
+    // A JSON config file provides the base values; any --adjoint-* flag set
+    // explicitly on the command line overrides its JSON counterpart below
+    // (Parameters::IsSet is true only for flags actually passed).
+    const std::string configFile =
+        Parameters::Get<Parameters::AdjointConfig>();
+    if (!configFile.empty()) {
+        loadAdjointConfigFile(configFile, config);
+    }
+
+    const auto override_ = [](auto& field, auto param) {
+        using P = decltype(param);
+        if (Parameters::IsSet<P>()) {
+            field = Parameters::Get<P>();
+        }
+    };
+    override_(config.save,             Parameters::AdjointSave{});
+    override_(config.mode,             Parameters::AdjointMode{});
+    override_(config.saveSystem,       Parameters::AdjointSaveSystem{});
+    override_(config.path,             Parameters::AdjointFile{});
+    override_(config.replayTolerance,  Parameters::AdjointReplayTolerance{});
+    override_(config.replayAbsTolerance, Parameters::AdjointReplayAbsTolerance{});
+    override_(config.residualEvalCheck, Parameters::AdjointResidualEvalCheck{});
+    override_(config.gradientMethod,   Parameters::AdjointGradientMethod{});
+    override_(config.fdStep,           Parameters::AdjointFdStep{});
+    override_(config.endpointMethod,   Parameters::AdjointEndpointMethod{});
+    override_(config.endpoints,        Parameters::AdjointEndpoints{});
+    override_(config.linearSolver,     Parameters::AdjointLinearSolver{});
+    override_(config.linearSolverReduction,
+              Parameters::AdjointLinearSolverReduction{});
+    override_(config.linearSolverMaxIter,
+              Parameters::AdjointLinearSolverMaxIter{});
+    override_(config.linearSolverVerbosity,
+              Parameters::AdjointLinearSolverVerbosity{});
+
+    // The objective string is overridden by an explicit CLI flag; a JSON
+    // objective (structured) is used only when no CLI objective was given.
+    if (Parameters::IsSet<Parameters::AdjointObjective>() ||
+        !config.objectiveSpec.has_value()) {
+        config.objective = Parameters::Get<Parameters::AdjointObjective>();
+        if (Parameters::IsSet<Parameters::AdjointObjective>()) {
+            config.objectiveSpec.reset();  // CLI wins
+        }
+    }
     return config;
 }
 
 void registerAdjointParameters()
 {
+    Parameters::Register<Parameters::AdjointConfig>
+        ("Path to a JSON configuration file for the adjoint run. It provides "
+         "base values (objective with weights/windows/wildcards, solver, "
+         "archive, gradient method); explicit --adjoint-* flags override it");
     Parameters::Register<Parameters::AdjointSave>
         ("Record per-substep simulation state for adjoint/replay runs");
     Parameters::Register<Parameters::AdjointMode>

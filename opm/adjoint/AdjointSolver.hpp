@@ -107,7 +107,10 @@ public:
         , config_(AdjointConfig::fromParameters())
         , replay_(simulator)
         , parallel_(simulator)
-        , objective_(config_.objective, simulator.vanguard().schedule())
+        , objective_(config_.objectiveSpec
+                         ? *config_.objectiveSpec
+                         : Adjoint::ObjectiveSpec::parse(config_.objective),
+                     simulator.vanguard().schedule())
     {
         replay_.setComputeBdiag(true);
         objective_.setParallel(&parallel_);

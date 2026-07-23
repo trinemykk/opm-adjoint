@@ -38,6 +38,22 @@ decks up to field models, and is guarded by a green ctest suite (**15/15**).
 | **Tests** | ctest **15/15**; FD-verified golden-reference regression set in `tests/references/`; per-eps FD accuracy study in [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md). |
 | **JutulDarcy cross-check** | Set up (`jutul/`); pattern/sign-level agreement (forwards differ by well model). FD remains the authoritative oracle. |
 
+### Configuration file (`--adjoint-config=<file>.json`)
+
+A JSON config file (2026-07-23) replaces the grown `--adjoint-*` flag strings and
+adds a **structured objective** (per-term wells/phase/weight/time-window,
+wildcards) the CLI string cannot express. It is the *base* configuration; any
+`--adjoint-*` flag set explicitly on the command line **overrides** its JSON
+counterpart. Schema v1 (sections optional): `mode`, `archive` {path, save,
+save_system}, `gradient` {method, fd_step, endpoint_method}, `solver`
+{linear_solver, reduction, max_iter}, `endpoints`, `objective` (either
+`{kind: pressure-average}`, `{kind: bhp, well, window_days}`, or `{terms: [...]}`
+with per-term kind/wells/phase/reference_case/target_sm3_per_day/weight/
+window_days). Loader `AdjointConfigFile.hpp` (boost::property_tree); the
+TypeTag-free `AdjointObjectiveSpec.hpp` is shared by the CLI parser and the
+loader. Guarded by ctest `adjoint_config_spe1` (config == equivalent flags;
+CLI overrides JSON).
+
 ### Objective functions (`--adjoint-objective=`)
 
 Per-substep sum objectives `J = Σₖ Jₖ(xₖ, xwₖ)` (Jutul-style interface):

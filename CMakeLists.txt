@@ -226,6 +226,11 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-perm-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/dirderiv_perm_spe1)
+    # --adjoint-config JSON == equivalent flag string; CLI overrides JSON.
+    add_test(NAME adjoint_config_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-config-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/config_spe1)
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>
