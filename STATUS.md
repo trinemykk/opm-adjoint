@@ -152,10 +152,28 @@ PERMX multiplier FD vs adjoint `general-ad`, h=1e-2, cnv 1e-9):
 | INJ perf (1,1,1) | pressure-average | −3.429e1 | −3.406e1 | 0.7 % |
 | unperforated (5,5,2) | pressure-average | 6.800e1 | 6.811e1 | −0.2 % (noise) |
 
-Same picture with `bhp:PROD` (prod-perf gap 94.3 %). **Decision: the well-row
-perm term (λ·dR/dCTF·dCTF/dK) is mandatory for perm history matching** — at
-drawdown-limited producer perforations the cell-based perm gradient is ~20×
-too small. It is negligible for rate-controlled injectors (delivery not CTF-limited).
+Same picture with `bhp:PROD` (prod-perf gap 94.3 %). **This gap is now closed**
+(dCTF/dperm term below); it was negligible for rate-controlled injectors anyway.
+
+### dCTF/dperm well-coupling term IMPLEMENTED (B1, 2026-07-23)
+
+`accumulatePermWellTerm_` (AdjointSolver.hpp) adds the well-equation
+contribution to `dJ/dperm` at defaulted-CTF perforations. The CTF enters the
+reservoir source and well residual **linearly** (Tw = CTF·trans_mult,
+cq = −Tw·mob·drawdown), so perturbing the well index (new mutable
+`WellInterfaceGeneric::wellIndex()` hook) and re-linearizing, the whole-domain
+contraction `λ_r·R_r + λ_w·R_w` (reused from the endpoint path) captures BOTH
+sides; central-differencing gives `dJ/d(ln CTF)`. Chained to perm via the
+dominant Peaceman term `Kh = √(K_a·K_b)·h` ⇒ `d(ln CTF)/dK_a = 1/(2·K_a)` for
+the two directions perpendicular to the connection (the weak r0 dependence is
+neglected in v1 — residual < 0.2 % at the SPE1 perf). Explicit-CTF connections
+have `dCTF/dK = 0` and are skipped (no-op for explicit-CTF decks). Added to both
+the analytic and general perm paths. **Result: SPE1 producer-perforation
+FD-vs-adjoint 95.6 % → 0.2 %**; the perm directional test now passes UN-masked.
+Flag `--adjoint-perm-well-term` (default on) / JSON `gradient.perm_well_term`.
+ctest `adjoint_fd_perm_well_spe1`. Cost: 2 whole-domain re-linearizations per
+perforation per substep — cheap (perfs ≪ cells); the AD/linearity path (plan
+§B1) would remove the re-linearization for very-many-perforation field decks.
 
 ### Well-objective (bhp) gradient deviation on SPE1 — INVESTIGATED 2026-07-23
 
