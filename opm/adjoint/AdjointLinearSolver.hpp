@@ -152,7 +152,12 @@ public:
 private:
     void scatterTransposed_(const Vector& x, Vector& y) const
     {
-        for (auto row = forward_.begin(); row.index() < interiorSize_; ++row) {
+        // NB: the end() check must come first - a rank whose subdomain has
+        // no overlap rows (interiorSize_ == numRows) would otherwise
+        // evaluate row.index() on the end iterator (UB).
+        const auto rowEnd = forward_.end();
+        for (auto row = forward_.begin();
+             row != rowEnd && row.index() < interiorSize_; ++row) {
             const auto k = row.index();
             for (auto col = (*row).begin(); col != (*row).end(); ++col) {
                 // y[col] += A[k][col]^T x[k]
@@ -163,14 +168,24 @@ private:
 
     static std::size_t computeInteriorSize_(const Comm& comm)
     {
+        // Relies on flow's ghost-last cell ordering: owner-attributed local
+        // indices form the contiguous range [0, interiorSize).
+        constexpr auto owner = Dune::OwnerOverlapCopyAttributeSet::owner;
         std::size_t is = 0;
+        std::size_t numOwner = 0;
         const auto& indexSet = comm.indexSet();
         for (auto idx = indexSet.begin(); idx != indexSet.end(); ++idx) {
-            if (idx->local().attribute() == 1) { // owner
+            if (idx->local().attribute() == owner) {
                 is = std::max<std::size_t>(is, idx->local().local());
+                ++numOwner;
             }
         }
-        return is + 1;
+        if (numOwner > 0 && numOwner != is + 1) {
+            OPM_THROW(std::logic_error,
+                      "Adjoint transposed operator requires ghost-last cell "
+                      "ordering (owner indices contiguous from 0)");
+        }
+        return numOwner;
     }
 
     const Matrix& forward_;
