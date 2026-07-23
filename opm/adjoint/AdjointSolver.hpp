@@ -1011,50 +1011,86 @@ private:
         if (endpointDefs_.empty()) {
             return;
         }
+        if (gradientEndpoints_.empty()) {
+            gradientEndpoints_.assign(
+                endpointDefs_.size(),
+                std::vector<Scalar>(simulator_.model().numGridDof(), 0.0));
+        }
+        if (config_.endpointMethod == "stencil") {
+            accumulateEndpointGradientsStencil_(dt, lambda);
+        } else {
+            accumulateEndpointGradientsWhole_(dt, lambda);
+        }
+    }
+
+    //! \brief Whole-domain perturbed contraction
+    //!        lambda_r . R_r + sum_w lambda_w . R_w at the CURRENT
+    //!        material-law state: full re-linearization (well sources flow
+    //!        through problem.source, well equations re-assembled in
+    //!        beginIteration), then contract. Used by the 'whole' endpoint
+    //!        method for every cell and by the 'stencil' method as the
+    //!        fallback for perforated cells (whose perturbation reaches the
+    //!        well equations).
+    Scalar endpointWholeContraction_(const Vector& lambda)
+    {
         auto& model = simulator_.model();
         auto& problem = simulator_.problem();
         const std::size_t numCells = model.numGridDof();
-        EndpointPerturber<TypeTag> perturber(problem);
 
-        if (gradientEndpoints_.empty()) {
-            gradientEndpoints_.assign(endpointDefs_.size(),
-                                      std::vector<Scalar>(numCells, 0.0));
+        // both time levels: Pc/kr changes affect the new-time fluxes
+        // and sources AND the old-time storage (phase pressure -> invB)
+        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/1);
+        problem.beginIteration();
+        model.linearizer().linearizeDomain();
+        problem.endIteration();
+
+        Scalar value = 0.0;
+        const auto& res = model.linearizer().residual();
+        for (std::size_t i = 0; i < numCells; ++i) {
+            for (int eq = 0; eq < numEq; ++eq) {
+                value += lambda[i][eq] * res[i][eq];
+            }
         }
-
-        auto relinearizedContraction = [&]() -> Scalar {
-            // both time levels: Pc/kr changes affect the new-time fluxes
-            // and sources AND the old-time storage (phase pressure -> invB)
-            model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
-            model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/1);
-            problem.beginIteration();
-            model.linearizer().linearizeDomain();
-            problem.endIteration();
-
-            Scalar value = 0.0;
-            const auto& res = model.linearizer().residual();
-            for (std::size_t i = 0; i < numCells; ++i) {
-                for (int eq = 0; eq < numEq; ++eq) {
-                    value += lambda[i][eq] * res[i][eq];
-                }
+        for (const auto& wellPtr : problem.wellModel().localNonshutWells()) {
+            const auto* stdWell =
+                dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
+            if (!stdWell) {
+                continue;
             }
-            for (const auto& wellPtr : problem.wellModel().localNonshutWells()) {
-                const auto* stdWell =
-                    dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
-                if (!stdWell) {
-                    continue;
-                }
-                const auto lwIt = lambdaWells_.find(stdWell->name());
-                if (lwIt == lambdaWells_.end()) {
-                    continue;
-                }
-                const auto& resWell = stdWell->linSys().residual();
-                const auto& lw = lwIt->second;
-                for (std::size_t j = 0; j < lw.size(); ++j) {
-                    value += lw[j] * resWell[0][j];
-                }
+            const auto lwIt = lambdaWells_.find(stdWell->name());
+            if (lwIt == lambdaWells_.end()) {
+                continue;
             }
-            return value;
-        };
+            const auto& resWell = stdWell->linSys().residual();
+            const auto& lw = lwIt->second;
+            for (std::size_t j = 0; j < lw.size(); ++j) {
+                value += lw[j] * resWell[0][j];
+            }
+        }
+        return value;
+    }
+
+    //! \brief Restore the model to the unperturbed converged-linearization
+    //!        state after whole-domain endpoint perturbations.
+    void restoreConvergedLinearization_()
+    {
+        auto& model = simulator_.model();
+        auto& problem = simulator_.problem();
+        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/1);
+        problem.beginIteration();
+        model.linearizer().linearizeDomain();
+        problem.endIteration();
+    }
+
+    //! \brief Original whole-domain endpoint method: 2 full
+    //!        re-linearizations per (parameter, cell) - cell x Ncells work.
+    void accumulateEndpointGradientsWhole_(double /*dt*/, const Vector& lambda)
+    {
+        auto& problem = simulator_.problem();
+        const std::size_t numCells = simulator_.model().numGridDof();
+        EndpointPerturber<TypeTag> perturber(problem);
 
         const Scalar h = config_.fdStep;
         for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
@@ -1068,21 +1104,140 @@ private:
                     continue;
                 }
                 perturber.apply(i, def, h);
-                const Scalar plus = relinearizedContraction();
+                const Scalar plus = endpointWholeContraction_(lambda);
                 perturber.apply(i, def, -h);
-                const Scalar minus = relinearizedContraction();
+                const Scalar minus = endpointWholeContraction_(lambda);
                 perturber.restore(i, def);
 
                 gradientEndpoints_[p][i] += (plus - minus) / (2.0 * h);
             }
         }
 
-        // leave the model in the unperturbed converged-linearization state
-        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
-        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/1);
-        problem.beginIteration();
-        model.linearizer().linearizeDomain();
-        problem.endIteration();
+        restoreConvergedLinearization_();
+    }
+
+    //! \brief Local cells perforated by any (standard) well.
+    std::vector<bool> perforatedCells_() const
+    {
+        std::vector<bool> perforated(simulator_.model().numGridDof(), false);
+        const auto& wellModel = simulator_.problem().wellModel();
+        for (const auto& wellPtr : wellModel.localNonshutWells()) {
+            const auto* stdWell =
+                dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
+            if (!stdWell) {
+                continue;
+            }
+            for (const int cell : stdWell->cells()) {
+                perforated[cell] = true;
+            }
+        }
+        return perforated;
+    }
+
+    //! \brief IQ source returning a locally-rebuilt (perturbed) IQ for one
+    //!        cell and the model cache for every other cell.
+    struct EndpointOverrideIQ
+    {
+        const Simulator& simulator;
+        unsigned cell;
+        const std::array<IntensiveQuantities, 2>* local;
+        const IntensiveQuantities& operator()(unsigned c, unsigned t) const
+        {
+            return c == cell ? (*local)[t]
+                             : simulator.model().intensiveQuantities(c, t);
+        }
+    };
+
+    //! \brief Stencil-local endpoint method: an end point of cell i only
+    //!        changes cell i's relperm/Pc, so the residual changes only in
+    //!        {i} u neighbors(i) - cell x ~7 work instead of cell x Ncells.
+    //!
+    //! Mechanism per (parameter, non-perforated interior cell i): perturb the
+    //! material law (EndpointPerturber), rebuild cell i's intensive
+    //! quantities at BOTH time levels through the public
+    //! IntensiveQuantities::update (the perturbed relperm/Pc flows in; both
+    //! levels because Pc shifts phase pressures and hence the old-time
+    //! storage), evaluate the residual of i and its neighbours with the
+    //! model cache overridden for cell i only, contract with lambda, central
+    //! difference. The model's IQ cache is never invalidated, so the
+    //! neighbours read the unperturbed converged state throughout.
+    //!
+    //! Perforated cells fall back to the whole-domain contraction: their
+    //! perturbation changes the perforation rates and hence the well
+    //! equations (the lambda_w . dR_w term), which the cell evaluator does
+    //! not carry. The fallback pass runs AFTER the stencil pass because the
+    //! whole-domain re-linearizations leave the model IQ cache perturbed.
+    void accumulateEndpointGradientsStencil_(double /*dt*/, const Vector& lambda)
+    {
+        auto& model = simulator_.model();
+        auto& problem = simulator_.problem();
+        const std::size_t numCells = model.numGridDof();
+        EndpointPerturber<TypeTag> perturber(problem);
+        AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
+        const auto& neighborInfo = model.linearizer().getNeighborInfo();
+        const auto perforated = perforatedCells_();
+        const Scalar h = config_.fdStep;
+
+        std::array<IntensiveQuantities, 2> localIQ;
+        using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
+        EqVec res(0.0);
+
+        auto stencilContraction = [&](unsigned i) -> Scalar {
+            for (unsigned t = 0; t < 2; ++t) {
+                localIQ[t].update(problem, model.solution(t)[i], i, t);
+            }
+            const EndpointOverrideIQ iq{simulator_, i, &localIQ};
+            Scalar value = 0.0;
+            evaluator.evalCellResidual(i, iq, res);
+            for (int eq = 0; eq < numEq; ++eq) {
+                value += lambda[i][eq] * res[eq];
+            }
+            for (const auto& nb : neighborInfo[i]) {
+                evaluator.evalCellResidual(nb.neighbor, iq, res);
+                for (int eq = 0; eq < numEq; ++eq) {
+                    value += lambda[nb.neighbor][eq] * res[eq];
+                }
+            }
+            return value;
+        };
+
+        // Pass 1: stencil-local for non-perforated interior cells (the model
+        // IQ cache stays pristine - nothing invalidates it here).
+        for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
+            const auto& def = *endpointDefs_[p];
+            for (unsigned i = 0; i < numCells; ++i) {
+                if (!parallel_.interior(i) || perforated[i]) {
+                    continue;
+                }
+                perturber.apply(i, def, h);
+                const Scalar plus = stencilContraction(i);
+                perturber.apply(i, def, -h);
+                const Scalar minus = stencilContraction(i);
+                perturber.restore(i, def);
+                gradientEndpoints_[p][i] += (plus - minus) / (2.0 * h);
+            }
+        }
+
+        // Pass 2: whole-domain fallback for perforated interior cells.
+        bool ranFallback = false;
+        for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
+            const auto& def = *endpointDefs_[p];
+            for (unsigned i = 0; i < numCells; ++i) {
+                if (!parallel_.interior(i) || !perforated[i]) {
+                    continue;
+                }
+                ranFallback = true;
+                perturber.apply(i, def, h);
+                const Scalar plus = endpointWholeContraction_(lambda);
+                perturber.apply(i, def, -h);
+                const Scalar minus = endpointWholeContraction_(lambda);
+                perturber.restore(i, def);
+                gradientEndpoints_[p][i] += (plus - minus) / (2.0 * h);
+            }
+        }
+        if (ranFallback) {
+            restoreConvergedLinearization_();
+        }
     }
 
     void writeResults_(Scalar objectiveValue)

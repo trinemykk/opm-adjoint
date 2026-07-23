@@ -36,6 +36,7 @@ AdjointConfig AdjointConfig::fromParameters()
     config.residualEvalCheck = Parameters::Get<Parameters::AdjointResidualEvalCheck>();
     config.gradientMethod = Parameters::Get<Parameters::AdjointGradientMethod>();
     config.fdStep = Parameters::Get<Parameters::AdjointFdStep>();
+    config.endpointMethod = Parameters::Get<Parameters::AdjointEndpointMethod>();
     config.objective = Parameters::Get<Parameters::AdjointObjective>();
     config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
     config.linearSolver = Parameters::Get<Parameters::AdjointLinearSolver>();
@@ -97,6 +98,10 @@ void registerAdjointParameters()
         ("Central-difference step for the finite-difference gradient paths "
          "('general' multiplier perturbations and end-point gradients); "
          "the exact 'general-ad' path ignores it");
+    Parameters::Register<Parameters::AdjointEndpointMethod>
+        ("End-point gradient evaluation: 'whole' (full re-linearization per "
+         "perturbation, default) or 'stencil' (stencil-local re-evaluation, "
+         "~Ncells/7 x faster, whole-domain fallback for perforated cells)");
 }
 
 } // namespace Opm

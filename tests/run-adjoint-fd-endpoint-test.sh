@@ -17,11 +17,12 @@
 #
 # Usage:
 #   run-adjoint-fd-endpoint-test.sh <flow_adjoint> <inputfiles-dir> <output-dir> \
-#       [keyword] [base-value] [delta] [rel-tol] [objective] [orat]
+#       [keyword] [base-value] [delta] [rel-tol] [objective] [orat] [method]
+# method: 'whole' (default) or 'stencil' (--adjoint-endpoint-method)
 
 set -u
 
-FLOW=${1:?usage: $0 <flow_adjoint> <inputfiles-dir> <output-dir> [keyword] [base] [delta] [rel-tol] [objective] [orat]}
+FLOW=${1:?usage: $0 <flow_adjoint> <inputfiles-dir> <output-dir> [keyword] [base] [delta] [rel-tol] [objective] [orat] [method]}
 INPUTDIR=${2:?missing inputfiles dir}
 OUTDIR=${3:?missing output dir}
 KEYWORD=${4:-SWL}
@@ -30,6 +31,7 @@ DELTA=${6:-1e-5}
 RELTOL=${7:-1e-3}
 OBJECTIVE=${8:-pressure-average}
 ORAT=${9:-}
+METHOD=${10:-whole}
 
 DECKNAME=MODEL_1D_DEBUG
 NCELLS=3
@@ -94,6 +96,7 @@ ${FLOW} "${OUTDIR}/inputfiles_base/${DECKNAME}.DATA" --output-dir="${BASE}" ${ST
     --adjoint-save=true > "${BASE}/fwd.log" 2>&1 || { echo "base forward failed"; exit 1; }
 ${FLOW} "${OUTDIR}/inputfiles_base/${DECKNAME}.DATA" --output-dir="${BASE}" ${STRICT} \
     --adjoint-mode=gradient --adjoint-endpoints="${KEYWORD}" \
+    --adjoint-endpoint-method="${METHOD}" \
     > "${BASE}/grad.log" 2>&1 || { echo "gradient run failed"; exit 1; }
 GRADFILE=${BASE}/${DECKNAME}.ADJOINT_GRADIENTS_ENDPOINT_${KEYWORD}.txt
 [ -f "${GRADFILE}" ] || { echo "no gradient file ${GRADFILE}"; exit 1; }

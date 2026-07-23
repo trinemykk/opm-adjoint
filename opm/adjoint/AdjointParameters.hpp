@@ -100,6 +100,13 @@ struct AdjointGradientMethod { static constexpr auto value = "analytic"; };
 //!        'general-ad' path does not use it.
 struct AdjointFdStep { static constexpr double value = 1e-7; };
 
+//! \brief How the end-point FD gradients evaluate the perturbed residual:
+//!        "whole" (full re-linearization per perturbation, the original
+//!        cell x Ncells method, default) or "stencil" (stencil-local
+//!        re-evaluation, cell x ~7, with a whole-domain fallback for
+//!        perforated cells whose perturbation reaches the well equations).
+struct AdjointEndpointMethod { static constexpr auto value = "whole"; };
+
 } // namespace Opm::Parameters
 
 namespace Opm {
@@ -117,6 +124,7 @@ struct AdjointConfig
     bool residualEvalCheck{false}; //!< verify the standalone residual evaluator
     std::string gradientMethod{"analytic"}; //!< "analytic" or "general"
     double fdStep{1e-7};      //!< central-difference step for FD gradients
+    std::string endpointMethod{"whole"}; //!< endpoint FD: "whole" or "stencil"
     std::string objective{};  //!< objective specification
     std::string endpoints{};  //!< end-point parameter list
     std::string linearSolver{};  //!< adjoint linear solver spec

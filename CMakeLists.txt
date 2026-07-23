@@ -152,6 +152,14 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d}
               ${_testout}/fd_endpoint_swl)
+    # Same FD verification against the stencil-local endpoint method
+    # (cell x ~7 instead of cell x Ncells; whole-domain fallback for
+    # perforated cells).
+    add_test(NAME adjoint_fd_endpoint_swl_stencil
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d}
+              ${_testout}/fd_endpoint_swl_stencil
+              SWL 0.0 1e-5 1e-3 pressure-average "" stencil)
     add_test(NAME adjoint_solver_m1d
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-solver-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
