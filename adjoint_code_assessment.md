@@ -34,8 +34,13 @@ ranked.
 > improvement `80abce6` (stencil-local endpoint gradients,
 > `--adjoint-endpoint-method=stencil`: FD-verified, 4.9e-11 vs whole on SPE1,
 > endpoint phase 14.58 s → 0.26 s = 56×; default stays `whole` per policy).
-> Still open: multi-mode WELLCTRL FD test, P2 face-targeted evaluations,
-> UMFPACK factorization reuse, FD/AD struct unification, and the F7 catalog
+> Performance follow-up (next day): **P2 done** `568e68c` — face/storage-targeted
+> general gradients, which also absorbed the FD/AD struct unification (SPE9
+> gradient phase: general 2.065 s → 0.360 s, general-ad 1.101 s → 0.200 s);
+> **P3 cheap wins done** — transposed-matrix storage reuse across solves +
+> applyscaleadd scratch `9b26d7e`, hoisted check scratch `a5aa91a`.
+> Still open: multi-mode WELLCTRL FD test, full UMFPACK symbolic-factorization
+> reuse (needs a richer wrapper than Dune::UMFPack exposes), and the F7 catalog
 > items (WGRUPCON Stage-2, endpoint well-row exact term, upstream endpoint AD).
 
 ## 2. Findings — possible errors (ranked by risk)
