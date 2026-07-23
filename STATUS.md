@@ -172,44 +172,49 @@ independent ways:
    deviation is ε-flat to 5 sig-figs across ε 4e-2…1e-3 (a kink shrinks as
    ε→0). It is a *smooth* systematic error.
 
-**Confirmed genuine, not noise.** The 2.94 % single-cell deviation is identical
-under forward `cnv=1e-11, mb=1e-13` and adjoint linear reduction 1e-14 **and**
-1e-16 — so it is a real Jacobian/matrix inexactness, not convergence or
-linear-solve noise. (Strict tolerances are mandatory when FD-testing the
-adjoint — see the strict-tolerance memory.)
+**ROOT CAUSE (2026-07-23): the `DRSDT 0` explicit cross-step Rs cap.** Removing
+DRSDT from SPE1 drops the single-cell bhp dJ/dPORO deviation from 2.94 % to
+**2e-6 (exact)**; ctest `adjoint_drsdt_crossterm_spe1` guards this. `DRSDT 0`
+caps `Rs_k ≤ Rs_{k-1}` wherever it binds (near the gas injector) — an explicit
+dependence of the step-k residual on the step-(k-1) Rs. Replay reproduces the
+*within-step* linearization bitwise, but the adjoint's *cross-step* coupling
+(reservoir storage Bdiag) does not carry this term, so dJ/dm is approximate.
+Per-objective at cell 144: bhp 2.94 %→0, pressure-average 0.2 %→0.2 % (diluted
+over 300 cells), gas-rate ~0.4 %. The earlier "inexact well Jacobian / mobility
+derivative" hypothesis is **refuted** — with DRSDT removed the well/bhp adjoint
+is exact, so D/B/C were always correct; the mobility and well-index derivatives
+are fine. bhp merely *exposed* the reservoir cross-step gap most (the producer
+BHP is sensitive to the near-injector Rs field; pressure-average dilutes it).
+
+Confirmed genuine, not noise: the 2.94 % is identical under forward
+`cnv=1e-11, mb=1e-13` and adjoint reduction 1e-14 **and** 1e-16. (Strict
+tolerances are mandatory when FD-testing the adjoint — see the strict-tolerance
+memory.) `AdjointDeckWarnings` now flags `DRSDT`/`DRVDT` whenever active
+(including value 0); the prior code wrongly excluded DRSDT 0 as "exact".
+
+**Field-HM relevance:** DRSDT (often 0 or small) is common in real decks to
+control gas dissolution, so this cross-step term matters for practical HM. Fix
+(task): add the DRSDT/DRVDT cross-step contribution to Bdiag — at binding cells
+`dR_k/dRs_{k-1}` equals the within-step `dR_k/dRs_k` (since `Rs_k = Rs_{k-1}`
+there), detectable from the converged capped-cell set.
 
 **Coverage gap that let it hide.** Every per-cell FD gradient test (pv, perm,
-**wellctrl**) runs only on MODEL_1D_DEBUG (3 cells, 7 calm substeps); SPE1 has
-replay/Jacobian-eval tests but **no FD gradient test**. So a well-objective
-gradient in a gas-evolving regime was never FD-checked. m1d (also DISGAS+VAPOIL,
-ORAT producer) matches bhp×PV at 4e-9 because it never evolves significant free
-gas.
+**wellctrl**) ran only on MODEL_1D_DEBUG (3 cells, 7 calm substeps); SPE1 had
+replay/Jacobian-eval tests but **no FD gradient test**, so a gradient in a
+gas-evolving, DRSDT-capped regime was never FD-checked. m1d (also DISGAS+VAPOIL)
+matches bhp×PV at 4e-9 — it has no binding DRSDT cap. Now closed by
+`adjoint_drsdt_crossterm_spe1` (well/bhp gradient FD-verified exact on SPE1 with
+DRSDT off; DRSDT-0 gap documented).
 
-**Mechanism (leading, well-evidenced).** The forward Newton converges the well
-equations to R_w ≈ 0 regardless of whether the assembled well Jacobian (D/B/C)
-is the *exact* linearization — Newton tolerates an inexact Jacobian. The adjoint
-instead applies `D⁻ᵀ` / `Bᵀ` to a **nonzero** RHS (`dJ/dxw = dt·e_bhp` for the
-bhp objective), so any inexactness in the well Jacobian that the forward's
-near-zero well residual never probes is exposed and amplified in the gradient.
-This explains every symptom: bhp-only (`pressure-average` has `dJ/dxw=0`;
-`rate:oil`'s `dJ/dxw` is the control-eq-row direction, which `D⁻ᵀ` maps to a
-trivial multiplier), ORAT-period-only (BHP a free variable), routes through the
-well so it hits any cell via λ_res, and grows with free-gas evolution — because
-the most likely inexact term is the **production perforation mobility
-derivative**: `getMobility` (WellInterface_impl.hpp:2131) takes the well-cell
-phase mobility `kr_p(S)/µ_p` at timeIdx=0 and maps its reservoir-cell AD
-derivatives into the well Evaluation via `extendEval`; `kr_p(S)` is strongly
-saturation-dependent for producers as gas evolves (injectors use total/injected
-mobility, so are insensitive — consistent with the injector being clean).
-
-**Next diagnostic (task W1).** FD-verify the assembled well Jacobian D and B
-against the well residual R_w at a converged substep (new well-matrix check,
-analogous to the reservoir `--adjoint-jacobian-eval-check`), isolating the
-mobility (`extendEval`/`dq/dS`) and well-index (`dq/d(CTF)`) columns. Expect the
-inexactness to surface in the mobility/saturation derivative. Until resolved,
-prefer `matchref` rate objectives for HM (oil ≲0.5 %, gas ~1.5 %); `bhp:`
-carries the documented caveat. A DISGAS well-objective FD test on SPE1 must be
-added to close the coverage gap.
+**Investigation trail (for the record).** Two earlier hypotheses were tested and
+refuted before DRSDT: (1) the well explicit-quantities term (connection Δp / F0)
+— ruled out (SPE1 datums give zero head; no wellbore volume; head-shift
+invariant). (2) an inexact well Jacobian / production mobility derivative
+(`getMobility` → `extendEval`) exposed by the adjoint's nonzero `dJ/dxw` RHS — a
+plausible mechanism, but refuted by the DRSDT toggle (well/bhp gradient is exact
+once DRSDT is removed, so D/B/C were always correct). The lesson worth keeping:
+a *reservoir* explicit cross-step term (DRSDT) can present as a *well-objective*
+error because the producer BHP is the quantity most sensitive to it.
 
 ### Multisegment wells — NOT supported for gradients (2026-07-23)
 

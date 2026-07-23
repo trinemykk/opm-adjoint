@@ -204,6 +204,14 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/general_oracle_spe1)
+    # Well-objective (bhp) FD gradient on the real DISGAS deck — the FD suite
+    # otherwise only runs on the 3-cell MODEL_1D_DEBUG. Asserts the gradient is
+    # exact once DRSDT is removed (well/bhp coupling correct), and documents the
+    # DRSDT-0 cross-step gap (~3%) that is otherwise missing from dJ/dm.
+    add_test(NAME adjoint_drsdt_crossterm_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-drsdt-crossterm-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/drsdt_crossterm_spe1)
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>

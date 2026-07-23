@@ -79,26 +79,34 @@ inline void warnAdjointDeckApproximations(const Simulator& simulator)
     bool drsdt = false, drvdt = false, vappars = false;
     for (std::size_t i = 0; i < nstep; ++i) {
         const auto& ov = schedule[i].oilvap();
-        // Only flag an *active* rate limit: DRSDT/DRVDT 0 (a frozen, i.e.
-        // constant, bubble/dew point) carries no rate-dependent cross-term
-        // and is reproduced exactly (e.g. SPE1CASE1 has DRSDT 0 and is
-        // FD-verified exact).
+        // Flag DRSDT/DRVDT whenever active, INCLUDING the value 0. A DRSDT
+        // rate limit caps Rs_k at Rs_{k-1} + maxDRSDT*dt wherever it binds, an
+        // explicit dependence of the step-k residual on the step-(k-1) Rs.
+        // Replay reproduces the within-step linearization bitwise, but the
+        // adjoint's cross-step coupling (reservoir storage Bdiag) does not
+        // carry this term, so dJ/dm is approximate. DRSDT 0 is the *most*
+        // binding case (Rs may not increase at all) — measured on SPE1CASE1:
+        // removing DRSDT drops the bhp-objective dJ/dPORO FD-vs-adjoint
+        // deviation from 2.94% to 0 (see STATUS.md). The earlier assumption
+        // that "DRSDT 0 is exact" was wrong.
         for (std::size_t r = 0; r < ov.numPvtRegions(); ++r) {
-            if (ov.drsdtActive() && ov.getMaxDRSDT(r) > 0.0) drsdt = true;
-            if (ov.drvdtActive() && ov.getMaxDRVDT(r) > 0.0) drvdt = true;
+            if (ov.drsdtActive(r)) drsdt = true;
+            if (ov.drvdtActive(r)) drvdt = true;
         }
         vappars |= (ov.getType() ==
                     OilVaporizationProperties::OilVaporization::VAPPARS);
     }
     if (drsdt) {
-        approxGradient.emplace_back("DRSDT",
-            "replay exact (cache-free storage); the dissolved-gas-rate-limit "
-            "cross-term in dJ/dm is neglected");
+        approxGradient.emplace_back("DRSDT (incl. DRSDT 0)",
+            "the dissolved-gas rate limit caps Rs_k against the step-(k-1) Rs "
+            "where it binds; replay is exact but this cross-step term in dJ/dm "
+            "is neglected. Material for well objectives on gas-evolving decks");
     }
     if (drvdt) {
-        approxGradient.emplace_back("DRVDT",
-            "replay exact (cache-free storage); the vaporized-oil-rate-limit "
-            "cross-term in dJ/dm is neglected");
+        approxGradient.emplace_back("DRVDT (incl. DRVDT 0)",
+            "the vaporized-oil rate limit caps Rv_k against the step-(k-1) Rv "
+            "where it binds; replay is exact but this cross-step term in dJ/dm "
+            "is neglected");
     }
     if (vappars) {
         approxGradient.emplace_back("VAPPARS",
