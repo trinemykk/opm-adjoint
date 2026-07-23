@@ -186,6 +186,14 @@ if(HAVE_OPM_TESTS)
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
               ${_testout}/general_ad_oracle_spe9 1e-5 general-ad)
+    # LARGER-CASE gradient verification by directional FD (per-cell FD is
+    # infeasible at 9000 cells). Deck-general MULTPV perturbation vs the adjoint
+    # dJ/d(pvmult); one random direction, strict tolerances, eps=1e-6.
+    add_test(NAME adjoint_dirderiv_general_spe9
+      COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-general.py
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
+              ${_testout}/dirderiv_general_spe9 pv pressure-average 1e-6 5e-3 1 1)
   endif()
   if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
     add_test(NAME adjoint_replay_spe1

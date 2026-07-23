@@ -77,11 +77,12 @@ DEV_BASE=$(deviation base keep)
 printf "no-DRSDT (Rs free)   rel.dev = %s   (must be < %s)\n" "$DEV_NODRS" "$RELTOL"
 printf "DRSDT 0  (Rs capped) rel.dev = %s   (documented gap, expected ~0.029)\n" "$DEV_BASE"
 
+# Only the fix-independent part is asserted: the no-DRSDT gradient must be
+# exact. The DRSDT-0 deviation is printed for information (its magnitude will
+# drop once the general cross-step term is added to Bdiag) but NOT asserted, so
+# this test neither needs nor breaks on that fix.
 status=0
 python3 -c "import sys; sys.exit(0 if abs($DEV_NODRS) < $RELTOL else 1)" || {
     echo "FAIL: no-DRSDT bhp gradient is not exact (well/bhp adjoint coupling broken)"; status=1; }
-python3 -c "import sys; sys.exit(0 if abs($DEV_BASE) > 5*$RELTOL else 1)" || {
-    echo "NOTE: DRSDT-0 deviation shrank — the cross-step term may have been fixed;"
-    echo "      if so, update this test to assert exactness for both cases."; }
-[ $status -eq 0 ] && echo "DRSDT cross-term regression: PASS (no-DRSDT exact; DRSDT-0 gap present)"
+[ $status -eq 0 ] && echo "DRSDT cross-term regression: PASS (no-DRSDT bhp gradient exact)"
 exit $status
