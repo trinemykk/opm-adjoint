@@ -152,57 +152,17 @@ public:
         }
     }
 
-    //! \brief Reservoir residual of one cell (flux + storage only, NO
-    //!        source) with a parameter perturbation applied to the
-    //!        transmissibility (flux term) and the pore-volume multiplier
-    //!        (storage term).
+    //! \brief Scaled storage term of one cell: pv · (S(x0) − S(x1)) · V/dt.
     //!
-    //! This is the stencil-local building block for parameter gradients:
-    //! the residual of cell \p globI depends on a parameter θ only through
-    //! the flux of its faces (trans) and its own storage (pore volume), and
-    //! the well source is θ-independent for the PV/trans/perm families (so
-    //! it cancels in a central difference and is omitted here). \p perturb
-    //! supplies pvScale(cell) and transScale(i,j).
-    //!
-    //! The result element type follows the perturbation's scale type: a
-    //! Scalar scale gives a Scalar residual (the FD path); a seeded
-    //! Evaluation scale gives an Evaluation residual whose derivative is the
-    //! exact dR/dθ (the AD path, Step 3). Because the TPFA flux is linear in
-    //! trans, the trans scale is applied to the flux *value* post-hoc, which
-    //! is exact and lets the scale be an AD type even though the kernel's
-    //! transmissibility field is a plain double.
-    template<class Perturb, class ResBlock>
-    void evalCellResidualReservoir(unsigned globI, const Perturb& perturb,
-                                   ResBlock& res) const
+    //! The parameter enters as the multiplier \p pv, whose type may be a
+    //! plain Scalar (finite differences) or a seeded one-slot Evaluation
+    //! (exact AD); the result element type follows it. This is the
+    //! targeted building block for the PV family: dR/d(pvmult) is
+    //! storage-only and diagonal, so nothing else needs evaluating.
+    template<class ScaleT, class ResBlock>
+    void evalStorageTerm(unsigned globI, const ScaleT& pv, ResBlock& res) const
     {
-        using Elem = std::decay_t<decltype(res[0])>;
         const auto& model = simulator_.model();
-        const auto& problem = simulator_.problem();
-        const auto& neighborInfo = model.linearizer().getNeighborInfo();
-
-        for (int eq = 0; eq < numEq; ++eq) {
-            res[eq] = Elem(0);
-        }
-
-        // --- flux term: trans scale applied to the (linear-in-trans) flux ---
-        const auto& iqIn = model.intensiveQuantities(globI, /*timeIdx=*/0);
-        RateVector flux(0.0);
-        RateVector darcy(0.0);
-        for (const auto& nbInfo : neighborInfo[globI]) {
-            const unsigned globJ = nbInfo.neighbor;
-            const auto& iqEx = model.intensiveQuantities(globJ, /*timeIdx=*/0);
-            flux = 0.0;
-            darcy = 0.0;
-            LocalResidual::computeFlux(flux, darcy, globI, globJ, iqIn, iqEx,
-                                       nbInfo.res_nbinfo, problem.moduleParams());
-            const auto ts = perturb.transScale(globI, globJ);
-            const Scalar faceArea = nbInfo.res_nbinfo.faceArea;
-            for (int eq = 0; eq < numEq; ++eq) {
-                res[eq] += ts * (scalarValue_(flux[eq]) * faceArea);
-            }
-        }
-
-        // --- storage term with pore-volume scale ---
         EqVector storageNew(0.0);
         EqVector storageOld(0.0);
         LocalResidual::template computeStorage<Scalar>(
@@ -211,9 +171,42 @@ public:
             storageOld, model.intensiveQuantities(globI, 1));
         const Scalar storefac = model.dofTotalVolume(globI)
                               / simulator_.timeStepSize();
-        const auto pv = perturb.pvScale(globI);
         for (int eq = 0; eq < numEq; ++eq) {
-            res[eq] += pv * (storefac * (storageNew[eq] - storageOld[eq]));
+            res[eq] = pv * (storefac * (storageNew[eq] - storageOld[eq]));
+        }
+    }
+
+    //! \brief One directed face-flux contribution to R_globI:
+    //!        computeFlux over \p nb (an entry of getNeighborInfo()[globI])
+    //!        times faceArea, multiplied by \p ts.
+    //!
+    //! The scale is applied to the flux VALUE post-hoc — exact because the
+    //! TPFA flux is linear in the transmissibility and a positive scale
+    //! cannot flip the upwind direction — so \p ts may be a Scalar (FD) or
+    //! a seeded one-slot Evaluation (exact AD, including nonlinear scale
+    //! functions like the perm family's harmonic-mean ratio). The mirrored
+    //! contribution to the neighbour's residual comes from evaluating the
+    //! neighbour's own directed entry for the same face.
+    //!
+    //! This is the targeted building block for the trans/perm families: a
+    //! face parameter touches exactly this face's flux in R_I and R_J, so
+    //! evaluating whole-cell residuals (all faces + storage) is ~deg(cell)
+    //! times more kernel work for the same derivative.
+    template<class NbInfo, class ScaleT, class ResBlock>
+    void evalFaceTerm(unsigned globI, const NbInfo& nb, const ScaleT& ts,
+                      ResBlock& res) const
+    {
+        const auto& model = simulator_.model();
+        const auto& problem = simulator_.problem();
+        const auto& iqIn = model.intensiveQuantities(globI, 0);
+        const auto& iqEx = model.intensiveQuantities(nb.neighbor, 0);
+        RateVector flux(0.0);
+        RateVector darcy(0.0);
+        LocalResidual::computeFlux(flux, darcy, globI, nb.neighbor, iqIn,
+                                   iqEx, nb.res_nbinfo, problem.moduleParams());
+        const Scalar area = nb.res_nbinfo.faceArea;
+        for (int eq = 0; eq < numEq; ++eq) {
+            res[eq] = ts * (scalarValue_(flux[eq]) * area);
         }
     }
 
