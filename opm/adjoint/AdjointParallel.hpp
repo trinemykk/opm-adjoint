@@ -203,6 +203,36 @@ public:
         return result;
     }
 
+    //! \brief Cartesian ids of interior cells, in the SAME order as
+    //!        gatherCellField (sorted by id in parallel, local order in
+    //!        serial). Rank-0 only in parallel. Use to key gathered per-cell
+    //!        gradient columns for machine-readable output.
+    std::vector<long> gatherCellIds() const
+    {
+        std::vector<long> ids;
+        for (std::size_t i = 0; i < interior_.size(); ++i) {
+            if (interior_[i]) {
+                ids.push_back(cartesianIdx_[i]);
+            }
+        }
+        if (!parallel()) {
+            return ids;
+        }
+        const int localSize = static_cast<int>(ids.size());
+        std::vector<int> sizes(gridComm_.size(), 0);
+        gridComm_.gather(&localSize, sizes.data(), 1, 0);
+        std::vector<int> displ(gridComm_.size() + 1, 0);
+        std::partial_sum(sizes.begin(), sizes.end(), displ.begin() + 1);
+        std::vector<long> allIds(displ.back());
+        gridComm_.gatherv(ids.data(), localSize, allIds.data(),
+                          sizes.data(), displ.data(), 0);
+        if (rank() != 0) {
+            return {};
+        }
+        std::sort(allIds.begin(), allIds.end());
+        return allIds;
+    }
+
     //! \brief Gather text lines from all ranks onto rank 0 (order: by
     //!        rank, then local order). Returns the input unchanged in
     //!        serial; empty on rank != 0.

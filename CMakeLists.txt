@@ -237,6 +237,11 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-config-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/config_spe1)
+    # Machine-readable field output: cartesian-keyed CSV + JSON metadata sidecar.
+    add_test(NAME adjoint_field_output_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-field-output-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/field_output_spe1)
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>

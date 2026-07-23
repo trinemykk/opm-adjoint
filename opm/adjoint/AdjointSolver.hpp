@@ -1255,6 +1255,14 @@ private:
         // global id in parallel; identity in serial, so serial output is
         // byte-identical to the pre-MPI behavior).
         const auto pvGathered = parallel_.gatherCellField(gradientPv_);
+        // Cartesian ids matching the gathered per-cell order (for the
+        // machine-readable output) and per-term objective values reduced
+        // across ranks (the well of each term may live on another rank).
+        const auto cellIds = parallel_.gatherCellIds();
+        std::vector<Scalar> termValues;
+        for (const Scalar v : objective_.termObjectiveValues()) {
+            termValues.push_back(parallel_.parallel() ? parallel_.sum(v) : v);
+        }
         std::vector<std::vector<Scalar>> endpointGathered;
         for (const auto& g : gradientEndpoints_) {
             endpointGathered.push_back(parallel_.gatherCellField(g));
@@ -1391,6 +1399,115 @@ private:
         }
         OpmLog::info("Adjoint gradients written to " + base +
                      ".ADJOINT_GRADIENTS_{" + kinds + "}.txt");
+
+        // Machine-readable, cartesian-keyed output for optimizers (ERT/
+        // Everest): CSV columns + a JSON metadata sidecar.
+        writeFieldOutput_(base, objectiveValue, cellIds, pvGathered,
+                          permGathered, transLines, wellCtrlByModeLines,
+                          termValues);
+    }
+
+    //! \brief Machine-readable gradient output for history-matching drivers.
+    //!        CSV files keyed by cartesian cell index plus a JSON sidecar
+    //!        carrying the parameter basis, units, objective value and
+    //!        per-term breakdown. Rank 0 only. The human-readable .txt files
+    //!        stay; this is the stable, documented interface.
+    void writeFieldOutput_(const std::string& base,
+                           Scalar objectiveValue,
+                           const std::vector<long>& cellIds,
+                           const std::vector<Scalar>& pv,
+                           const std::vector<std::array<Scalar, 3>>& perm,
+                           const std::vector<std::string>& transLines,
+                           const std::vector<std::string>& wellByModeLines,
+                           const std::vector<Scalar>& termValues)
+    {
+        const std::string caseName = base.substr(base.find_last_of('/') + 1);
+        const Scalar mdToSi = 9.869233e-16;
+
+        const std::string poroCsv = base + ".ADJOINT_GRADIENTS_PORO.csv";
+        {
+            std::ofstream os(poroCsv);
+            os.precision(16);
+            os << "cartesian_index,dJ_dpvmult\n";
+            for (std::size_t i = 0; i < pv.size(); ++i) {
+                os << cellIds[i] << "," << pv[i] << "\n";
+            }
+        }
+        const std::string permCsv = base + ".ADJOINT_GRADIENTS_PERM.csv";
+        {
+            std::ofstream os(permCsv);
+            os.precision(16);
+            os << "cartesian_index,dJ_dPERMX,dJ_dPERMY,dJ_dPERMZ\n";
+            for (std::size_t i = 0; i < perm.size(); ++i) {
+                os << cellIds[i] << "," << perm[i][0] << "," << perm[i][1]
+                   << "," << perm[i][2] << "\n";
+            }
+        }
+        const std::string transCsv = base + ".ADJOINT_GRADIENTS_TRANS.csv";
+        {
+            std::ofstream os(transCsv);
+            os.precision(16);
+            os << "cartesian_i,cartesian_j,dJ_dtmult\n";
+            for (const auto& line : transLines) {
+                std::istringstream in(line);
+                long i, j; Scalar g; in >> i >> j >> g;
+                os << i << "," << j << "," << g << "\n";
+            }
+        }
+        const std::string wcCsv = base + ".ADJOINT_GRADIENTS_WELLCTRL.csv";
+        {
+            std::ofstream os(wcCsv);
+            os.precision(16);
+            os << "well,mode,dJ_dtarget\n";
+            for (const auto& line : wellByModeLines) {
+                std::istringstream in(line);
+                std::string well, mode, val; in >> well >> mode >> val;
+                os << well << "," << mode << "," << val << "\n";
+            }
+        }
+
+        // JSON metadata sidecar (hand-written; small and stable).
+        std::ofstream js(base + ".ADJOINT_GRADIENTS.json");
+        js.precision(16);
+        const auto rel = [&](const std::string& p) {
+            return p.substr(p.find_last_of('/') + 1);
+        };
+        js << "{\n"
+           << "  \"schema_version\": 1,\n"
+           << "  \"case\": \"" << caseName << "\",\n"
+           << "  \"convention\": \"minimize J; gradient is dJ/d(parameter)\",\n"
+           << "  \"objective\": { \"value\": " << objectiveValue;
+        if (!termValues.empty()) {
+            const auto& terms = objective_.rateTerms();
+            js << ", \"terms\": [";
+            for (std::size_t t = 0; t < termValues.size(); ++t) {
+                js << (t ? ", " : "") << "{ \"label\": \"" << terms[t].label
+                   << "\", \"value\": " << termValues[t]
+                   << ", \"weight\": " << terms[t].weight << " }";
+            }
+            js << "]";
+        }
+        js << " },\n"
+           << "  \"families\": [\n"
+           << "    { \"name\": \"poro\", \"file\": \"" << rel(poroCsv)
+           << "\", \"key\": \"cartesian_index\", \"basis\": \"multiplier\", "
+              "\"note\": \"dJ/d(pvmult) at pvmult=1; dJ/dPORO = value / poro\", "
+              "\"count\": " << pv.size() << " },\n"
+           << "    { \"name\": \"perm\", \"file\": \"" << rel(permCsv)
+           << "\", \"key\": \"cartesian_index\", \"basis\": \"value\", "
+              "\"units\": \"1/m^2 (SI)\", \"mD_to_SI\": " << mdToSi
+           << ", \"count\": " << perm.size() << " },\n"
+           << "    { \"name\": \"trans\", \"file\": \"" << rel(transCsv)
+           << "\", \"key\": \"cartesian_i,cartesian_j\", \"basis\": "
+              "\"multiplier\", \"note\": \"dJ/d(tmult) per face at tmult=1\" },\n"
+           << "    { \"name\": \"wellctrl\", \"file\": \"" << rel(wcCsv)
+           << "\", \"key\": \"well,mode\", \"basis\": \"value\", "
+              "\"units\": \"per m3/s (rate) or per Pa (bhp)\" }\n"
+           << "  ]\n"
+           << "}\n";
+
+        OpmLog::info("Adjoint field output: " + base +
+                     ".ADJOINT_GRADIENTS_{PORO,PERM,TRANS,WELLCTRL}.csv + .json");
     }
 
     //! \brief Global id for a transmissibility-face endpoint (cartesian
@@ -1398,8 +1515,10 @@ private:
     //!        output stays byte-identical to the pre-MPI behavior).
     long faceId_(std::size_t localCell) const
     {
-        return parallel_.parallel() ? parallel_.cartesianIndex(localCell)
-                                    : static_cast<long>(localCell);
+        // Always the cartesian (global) index — in serial too, so the
+        // face/cell ids in the output are a stable grid identifier an
+        // optimizer can map to, not a partition-dependent local index.
+        return parallel_.cartesianIndex(localCell);
     }
 
     //! \brief Permeability chain rule, post-processed from the
