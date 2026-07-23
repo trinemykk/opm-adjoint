@@ -50,6 +50,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 #include <dune/common/fmatrix.hh>
 
@@ -76,6 +77,9 @@ public:
     static constexpr int numEq = getPropValue<TypeTag, Properties::NumEq>();
     //! Dense block of dR_k/dx_{k-1} for one cell (block-diagonal cross term).
     using BdiagBlock = Dune::FieldMatrix<Scalar, numEq, numEq>;
+    using Matrix = std::remove_cvref_t<
+        decltype(std::declval<Simulator&>().model().linearizer()
+                     .jacobian().istlMatrix())>;
 
     explicit AdjointReplay(Simulator& simulator)
         : simulator_(simulator)
@@ -368,20 +372,32 @@ private:
         auto& liveMat = model_().linearizer().jacobian().istlMatrix();
         const auto refDump = AdjointMatrixDump::from(liveMat);
 
+        // Scratch matrix hoisted across substeps (the sparsity is constant;
+        // evalJacobian zeroes and refills all values).
+        if (!checkMat_) {
+            checkMat_ = std::make_unique<Matrix>(liveMat);
+        }
+
         // (1) model-cache IQ source (Step A).
-        auto myMat = liveMat; // copy to inherit the exact sparsity
-        evaluator.evalJacobian(myMat);
-        const auto diff = compare(refDump, AdjointMatrixDump::from(myMat),
+        evaluator.evalJacobian(*checkMat_);
+        const auto diff = compare(refDump, AdjointMatrixDump::from(*checkMat_),
                                   1e-300, config_.replayAbsTolerance);
 
         // (2) separate adjoint-owned IQ array, populated via the public
         //     IntensiveQuantities::update() (reuses the forward physics) — the
         //     substrate the adjoint manipulates. Must reproduce the same
-        //     Jacobian.
-        typename AdjointResidualEvaluator<TypeTag>::SeparateIQ sepIQ(simulator_);
-        auto sepMat = liveMat;
-        evaluator.evalJacobian(sepMat, sepIQ);
-        const auto sepDiff = compare(refDump, AdjointMatrixDump::from(sepMat),
+        //     Jacobian. The array object is hoisted; the per-substep rebuild
+        //     (IQ updates at the restored state) is the point of the check.
+        if (!sepIQ_) {
+            sepIQ_ = std::make_unique<
+                typename AdjointResidualEvaluator<TypeTag>::SeparateIQ>(
+                simulator_);
+        } else {
+            sepIQ_->rebuild();
+        }
+        evaluator.evalJacobian(*checkMat_, *sepIQ_);
+        const auto sepDiff = compare(refDump,
+                                     AdjointMatrixDump::from(*checkMat_),
                                      1e-300, config_.replayAbsTolerance);
 
         worstJacobianEval_ = std::max({worstJacobianEval_, diff.maxRelDiff,
@@ -460,6 +476,10 @@ private:
     bool residualEvalFailed_{false};
     double worstJacobianEval_{0.0};
     bool jacobianEvalFailed_{false};
+    //! Hoisted scratch for the per-substep evaluator checks.
+    std::unique_ptr<Matrix> checkMat_;
+    std::unique_ptr<typename AdjointResidualEvaluator<TypeTag>::SeparateIQ>
+        sepIQ_;
 };
 
 } // namespace Opm
