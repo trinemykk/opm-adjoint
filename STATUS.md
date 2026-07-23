@@ -49,7 +49,18 @@ Per-substep sum objectives `J = Σₖ Jₖ(xₖ, xwₖ)` (Jutul-style interface)
 | `rate:<WELL>:<phase>` | `Σₖ dtₖ · q` (time-integrated rate) | production/injection totals |
 | `match:<WELL>:<phase>:<target>` | `Σₖ dtₖ (q − target)²` | match a constant target |
 | `matchref:<WELL>:<phase>:<refcase>` | `Σₖ dtₖ (q − q_obs(t))²`, `q_obs` from a reference `ESmry`, time-interpolated | well-curve history matching |
-| `matchsum:<refcase>:<W>.<p>[+<W>.<p>…]` | sum of `matchref` terms over several well/phase pairs | multi-term misfit |
+| `matchsum:<refcase>:<W>.<p>[*<w>][+<W>.<p>…]` | sum of `matchref` terms over several well/phase pairs (optional per-term weight `*<w>`) | multi-term misfit |
+
+Rate-family extensions (2026-07-23): well names may be shell patterns
+(`OP_*`, expanded against the schedule at construction, error if nothing
+matches); optional trailing suffix tokens `:w=<weight>`, `:t0=<days>`,
+`:t1=<days>` set per-term weight and a time window (a substep contributes iff
+its end time lies in the window). A `matchref`/`matchsum` term without an
+explicit window defaults to the reference summary's time span, so times
+outside the observed data contribute nothing (previously: flat-extrapolated
+misfit with a warning). Per-term J values are accumulated and logged for
+multi-term objectives. Guarded by ctest `adjoint_matchref_extended_spe1`
+(FD-vs-adjoint under a weighted, windowed, wildcard objective).
 
 ### Derivatives (parameters, all FD-verified)
 

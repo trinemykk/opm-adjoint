@@ -107,7 +107,7 @@ public:
         , config_(AdjointConfig::fromParameters())
         , replay_(simulator)
         , parallel_(simulator)
-        , objective_(config_.objective)
+        , objective_(config_.objective, simulator.vanguard().schedule())
     {
         replay_.setComputeBdiag(true);
         objective_.setParallel(&parallel_);
@@ -164,12 +164,14 @@ public:
             return EXIT_FAILURE;
         }
         Scalar value = 0.0;
+        objective_.resetTermValues();
         for (int k = 0; k < numSubsteps; ++k) {
             const auto& step = meta.substeps[k];
             replay_.loadSnapshot(k, step.reportStep);
             value += objective_.stepValue(simulator_, k, numSubsteps, step.dt);
         }
         OpmLog::info(fmt::format("Adjoint objective J = {:.16e}", value));
+        logTermValues_();
         return EXIT_SUCCESS;
     }
 
@@ -196,6 +198,7 @@ public:
         std::vector<BdiagBlock> bdiagPrev;
 
         Scalar objectiveValue = 0.0;
+        objective_.resetTermValues();
         int replayFailures = 0;
 
         using Clock = std::chrono::steady_clock;
@@ -277,6 +280,7 @@ public:
         OpmLog::info(fmt::format(
             "Adjoint sweep finished: J = {:.16e}, {} substeps, {} replay "
             "verification failures", objectiveValue, numSubsteps, replayFailures));
+        logTermValues_();
         if (linearSolver_.totalIterations() > 0) {
             OpmLog::info(fmt::format(
                 "Adjoint linear solver '{}': {} iterations over {} solves "
@@ -1118,6 +1122,23 @@ private:
         }
         if (ranFallback) {
             restoreConvergedLinearization_();
+        }
+    }
+
+    //! \brief Log the per-term breakdown of J (rate-family objectives with
+    //!        more than one term; single-term J equals the total).
+    void logTermValues_() const
+    {
+        const auto& values = objective_.termObjectiveValues();
+        if (values.size() < 2) {
+            return;
+        }
+        const auto& terms = objective_.rateTerms();
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            OpmLog::info(fmt::format(
+                "Adjoint objective term {:>3} {:<30} J_term = {:.16e} "
+                "(weight {:g})", i, terms[i].label, values[i],
+                terms[i].weight));
         }
     }
 

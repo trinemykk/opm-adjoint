@@ -213,6 +213,13 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/matchref)
+    # Weighted (:w=), time-windowed (:t0=/:t1=) and wildcard-well matchref:
+    # same FD-vs-adjoint check, guarding the objective-layer extensions.
+    add_test(NAME adjoint_matchref_extended_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/matchref_ext
+              2e-5 1e-3 0.285 "matchref:PROD*:gas:%REF%:w=2.0:t0=0:t1=1800")
     # SPE1 needs ~125 backward solves; iterative agreement vs umfpack is
     # bounded by the accumulated lambda error (reduction 1e-14 -> ~1e-6).
     add_test(NAME adjoint_solver_spe1

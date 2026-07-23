@@ -32,11 +32,26 @@
  *      "rate:<WELL>:<phase>"                J += dt q
  *      "match:<WELL>:<phase>:<target>"      J += dt (q - q_t)^2
  *      "matchref:<WELL>:<phase>:<refcase>"  J += dt (q - q_obs(t))^2
- *      "matchsum:<refcase>:<W>.<p>[+<W>.<p>]..."
- *                                           J += sum_terms dt (q - q_obs)^2
+ *      "matchsum:<refcase>:<W>.<p>[*<w>][+<W>.<p>[*<w>]]..."
+ *                                           J += sum_terms w dt (q - q_obs)^2
  *    Observed curves are read from the reference run's summary via
  *    ESmry, interpolated linearly in time and converted from the file's
- *    rate unit to the internal SI/sign convention. Producers only (v1).
+ *    rate unit to the internal SI/sign convention.
+ *
+ * Rate-family extensions:
+ *  - Well names may be shell patterns ('*', '?'), expanded against the
+ *    schedule at construction; one spec term fans out into one RateTerm
+ *    per matching well.
+ *  - Optional trailing suffix tokens apply to every term of the spec:
+ *      :w=<weight>   per-term weight (multiplies matchsum per-term *<w>)
+ *      :t0=<days>    window start (substep contributes iff its end time
+ *      :t1=<days>    lies inside [t0, t1])
+ *    e.g. "matchref:OP*:oil:REFCASE:w=2:t0=0:t1=365".
+ *  - A matchref/matchsum term without an explicit window defaults to the
+ *    reference summary's time span, so times outside the observed data
+ *    contribute nothing (instead of a flat-extrapolated misfit).
+ *  - Per-substep term values are accumulated (termObjectiveValues());
+ *    the per-term breakdown of J is part of the gradient output.
  *
  * Phase is one of oil|water|gas.
  */
@@ -48,6 +63,8 @@
 
 #include <opm/io/eclipse/ESmry.hpp>
 
+#include <opm/input/eclipse/Schedule/Schedule.hpp>
+
 #include <fmt/format.h>
 
 #include <opm/models/utils/propertysystem.hh>
@@ -56,10 +73,195 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace Opm::Adjoint {
+
+enum class ObjectiveKind { PressureAverage, WellBhp, RateTerms };
+
+enum class ObjectiveTermType { Rate, MatchConst, MatchRef };
+
+//! One rate term of an objective specification, before well-pattern
+//! expansion. TypeTag-free so both the CLI string parser and a config-file
+//! loader can produce it.
+struct ObjectiveTermSpec
+{
+    std::vector<std::string> wells;   //!< exact names or shell patterns
+    std::string phase;                //!< oil|water|gas
+    ObjectiveTermType type{ObjectiveTermType::Rate};
+    double targetRateSi{0.0};         //!< MatchConst (SI, internal sign-free)
+    std::string referenceCase{};      //!< MatchRef
+    double weight{1.0};
+    double windowStartDays{-std::numeric_limits<double>::max()};
+    double windowEndDays{std::numeric_limits<double>::max()};
+    bool windowExplicit{false};
+};
+
+//! Parsed objective specification (TypeTag-free).
+struct ObjectiveSpec
+{
+    ObjectiveKind kind{ObjectiveKind::PressureAverage};
+    std::string wellName{};                //!< bhp objective (exact name)
+    std::vector<ObjectiveTermSpec> terms;  //!< rate-family objectives
+
+    static ObjectiveSpec parse(const std::string& spec);
+};
+
+namespace detail {
+
+inline std::vector<std::string> splitObjective(const std::string& text,
+                                               char sep, std::size_t expected)
+{
+    std::vector<std::string> parts;
+    std::size_t pos = 0;
+    while (parts.size() + 1 < expected) {
+        const auto next = text.find(sep, pos);
+        if (next == std::string::npos) {
+            throw std::runtime_error(
+                "Malformed adjoint objective specification: " + text);
+        }
+        parts.push_back(text.substr(pos, next - pos));
+        pos = next + 1;
+    }
+    parts.push_back(text.substr(pos));
+    return parts;
+}
+
+//! Pop a trailing ":<key>=<value>" token off \p s; true if popped.
+inline bool popSuffixToken(std::string& s, const char* key, std::string& value)
+{
+    const auto pos = s.rfind(':');
+    if (pos == std::string::npos) {
+        return false;
+    }
+    const std::string prefix = std::string(key) + "=";
+    const std::string tail = s.substr(pos + 1);
+    if (tail.rfind(prefix, 0) != 0) {
+        return false;
+    }
+    value = tail.substr(prefix.size());
+    s.erase(pos);
+    return true;
+}
+
+} // namespace detail
+
+inline ObjectiveSpec ObjectiveSpec::parse(const std::string& specIn)
+{
+    ObjectiveSpec result;
+    std::string spec = specIn;
+
+    // Strip trailing :w= / :t0= / :t1= tokens (order-free); they apply to
+    // every term parsed from this spec.
+    double weight = 1.0;
+    double t0 = -std::numeric_limits<double>::max();
+    double t1 = std::numeric_limits<double>::max();
+    bool windowExplicit = false;
+    for (bool popped = true; popped; ) {
+        std::string value;
+        popped = false;
+        if (detail::popSuffixToken(spec, "w", value)) {
+            weight = std::stod(value);
+            popped = true;
+        } else if (detail::popSuffixToken(spec, "t0", value)) {
+            t0 = std::stod(value);
+            windowExplicit = true;
+            popped = true;
+        } else if (detail::popSuffixToken(spec, "t1", value)) {
+            t1 = std::stod(value);
+            windowExplicit = true;
+            popped = true;
+        }
+    }
+
+    const auto makeTerm = [&](std::string well, std::string phase) {
+        ObjectiveTermSpec term;
+        term.wells.push_back(std::move(well));
+        term.phase = std::move(phase);
+        term.weight = weight;
+        term.windowStartDays = t0;
+        term.windowEndDays = t1;
+        term.windowExplicit = windowExplicit;
+        return term;
+    };
+
+    if (spec.empty() || spec == "pressure-average") {
+        result.kind = ObjectiveKind::PressureAverage;
+    } else if (spec.rfind("bhp:", 0) == 0) {
+        result.kind = ObjectiveKind::WellBhp;
+        result.wellName = spec.substr(4);
+        if (result.wellName.empty()) {
+            throw std::runtime_error(
+                "--adjoint-objective=bhp:<WELL> needs a well name");
+        }
+    } else if (spec.rfind("rate:", 0) == 0) {
+        result.kind = ObjectiveKind::RateTerms;
+        const auto parts = detail::splitObjective(spec.substr(5), ':', 2);
+        auto term = makeTerm(parts[0], parts[1]);
+        term.type = ObjectiveTermType::Rate;
+        result.terms.push_back(std::move(term));
+    } else if (spec.rfind("match:", 0) == 0) {
+        result.kind = ObjectiveKind::RateTerms;
+        const auto parts = detail::splitObjective(spec.substr(6), ':', 3);
+        auto term = makeTerm(parts[0], parts[1]);
+        term.type = ObjectiveTermType::MatchConst;
+        term.targetRateSi = std::stod(parts[2]) / 86400.0; // sm3/day -> SI
+        result.terms.push_back(std::move(term));
+    } else if (spec.rfind("matchref:", 0) == 0) {
+        result.kind = ObjectiveKind::RateTerms;
+        const auto parts = detail::splitObjective(spec.substr(9), ':', 3);
+        auto term = makeTerm(parts[0], parts[1]);
+        term.type = ObjectiveTermType::MatchRef;
+        term.referenceCase = parts[2];
+        result.terms.push_back(std::move(term));
+    } else if (spec.rfind("matchsum:", 0) == 0) {
+        // matchsum:<refcase>:<W>.<p>[*<w>][+<W>.<p>[*<w>]]...
+        result.kind = ObjectiveKind::RateTerms;
+        const auto rest = spec.substr(9);
+        const auto lastColon = rest.rfind(':');
+        if (lastColon == std::string::npos) {
+            throw std::runtime_error(
+                "--adjoint-objective=matchsum:<refcase>:<W>.<p>[+<W>.<p>]...");
+        }
+        const std::string refcase = rest.substr(0, lastColon);
+        const std::string termsSpec = rest.substr(lastColon + 1);
+        std::size_t pos = 0;
+        while (pos != std::string::npos && pos < termsSpec.size()) {
+            const auto plus = termsSpec.find('+', pos);
+            std::string one = termsSpec.substr(
+                pos, plus == std::string::npos ? std::string::npos : plus - pos);
+            double termWeight = 1.0;
+            if (const auto star = one.rfind('*'); star != std::string::npos) {
+                termWeight = std::stod(one.substr(star + 1));
+                one.erase(star);
+            }
+            const auto dot = one.find('.');
+            if (dot == std::string::npos) {
+                throw std::runtime_error(
+                    "matchsum term '" + one + "' must be <WELL>.<phase>");
+            }
+            auto term = makeTerm(one.substr(0, dot), one.substr(dot + 1));
+            term.type = ObjectiveTermType::MatchRef;
+            term.referenceCase = refcase;
+            term.weight = weight * termWeight;
+            result.terms.push_back(std::move(term));
+            pos = (plus == std::string::npos) ? std::string::npos : plus + 1;
+        }
+        if (result.terms.empty()) {
+            throw std::runtime_error("matchsum objective without terms");
+        }
+    } else {
+        throw std::runtime_error("Unknown adjoint objective '" + spec + "'");
+    }
+    return result;
+}
+
+} // namespace Opm::Adjoint
 
 namespace Opm {
 
@@ -72,11 +274,11 @@ public:
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
-    enum class Kind { PressureAverage, WellBhp, RateTerms };
+    using Kind = Adjoint::ObjectiveKind;
+    using TermType = Adjoint::ObjectiveTermType;
+    using ObjectiveSpec = Adjoint::ObjectiveSpec;
 
-    enum class TermType { Rate, MatchConst, MatchRef };
-
-    //! One rate term of the objective.
+    //! One rate term of the objective (one concrete well).
     struct RateTerm
     {
         std::string well;
@@ -86,6 +288,13 @@ public:
         Scalar weight{1.0};
         Scalar targetRate{0.0};        //!< MatchConst (internal units)
         std::string referenceCase{};   //!< MatchRef
+        std::string label{};           //!< "<type>:<well>:<phase>" for output
+        //! Substep contributes iff its end time [days] is in the window.
+        //! For MatchRef without an explicit window this defaults to the
+        //! reference summary's time span (set at load).
+        mutable Scalar windowStartDays{-std::numeric_limits<Scalar>::max()};
+        mutable Scalar windowEndDays{std::numeric_limits<Scalar>::max()};
+        bool windowExplicit{false};
         // observed curve (lazily loaded)
         mutable bool loaded{false};
         mutable bool clampWarned{false};        //!< out-of-window warning shown
@@ -93,80 +302,38 @@ public:
         mutable std::vector<Scalar> obsValues;  //!< internal units/sign
     };
 
-    explicit AdjointObjectiveFunction(const std::string& spec)
+    AdjointObjectiveFunction(const std::string& spec, const Schedule& schedule)
+        : AdjointObjectiveFunction(ObjectiveSpec::parse(spec), schedule)
+    {}
+
+    AdjointObjectiveFunction(const ObjectiveSpec& spec, const Schedule& schedule)
     {
-        if (spec.empty() || spec == "pressure-average") {
-            kind_ = Kind::PressureAverage;
-        } else if (spec.rfind("bhp:", 0) == 0) {
-            kind_ = Kind::WellBhp;
-            wellName_ = spec.substr(4);
-            if (wellName_.empty()) {
+        kind_ = spec.kind;
+        if (kind_ == Kind::WellBhp) {
+            wellName_ = spec.wellName;
+            if (!schedule.hasWell(wellName_)) {
                 OPM_THROW(std::runtime_error,
-                          "--adjoint-objective=bhp:<WELL> needs a well name");
+                          "Adjoint objective bhp: unknown well '" +
+                          wellName_ + "'");
             }
-        } else if (spec.rfind("rate:", 0) == 0) {
-            kind_ = Kind::RateTerms;
-            const auto parts = split_(spec.substr(5), ':', 2);
-            RateTerm term;
-            term.well = parts[0];
-            setPhase_(term, parts[1]);
-            term.type = TermType::Rate;
-            terms_.push_back(std::move(term));
-        } else if (spec.rfind("match:", 0) == 0) {
-            kind_ = Kind::RateTerms;
-            const auto parts = split_(spec.substr(6), ':', 3);
-            RateTerm term;
-            term.well = parts[0];
-            setPhase_(term, parts[1]);
-            term.type = TermType::MatchConst;
-            term.targetRate = std::stod(parts[2]) / 86400.0; // sm3/day -> SI
-            terms_.push_back(std::move(term));
-        } else if (spec.rfind("matchref:", 0) == 0) {
-            kind_ = Kind::RateTerms;
-            const auto parts = split_(spec.substr(9), ':', 3);
-            RateTerm term;
-            term.well = parts[0];
-            setPhase_(term, parts[1]);
-            term.type = TermType::MatchRef;
-            term.referenceCase = parts[2];
-            terms_.push_back(std::move(term));
-        } else if (spec.rfind("matchsum:", 0) == 0) {
-            // matchsum:<refcase>:<W>.<p>[+<W>.<p>]...
-            kind_ = Kind::RateTerms;
-            const auto rest = spec.substr(9);
-            const auto lastColon = rest.rfind(':');
-            if (lastColon == std::string::npos) {
-                OPM_THROW(std::runtime_error,
-                          "--adjoint-objective=matchsum:<refcase>:<W>.<p>[+<W>.<p>]...");
-            }
-            const std::string refcase = rest.substr(0, lastColon);
-            const std::string termsSpec = rest.substr(lastColon + 1);
-            std::size_t pos = 0;
-            while (pos != std::string::npos && pos < termsSpec.size()) {
-                const auto plus = termsSpec.find('+', pos);
-                const std::string one = termsSpec.substr(
-                    pos, plus == std::string::npos ? std::string::npos : plus - pos);
-                const auto dot = one.find('.');
-                if (dot == std::string::npos) {
-                    OPM_THROW(std::runtime_error,
-                              "matchsum term '" + one + "' must be <WELL>.<phase>");
-                }
-                RateTerm term;
-                term.well = one.substr(0, dot);
-                setPhase_(term, one.substr(dot + 1));
-                term.type = TermType::MatchRef;
-                term.referenceCase = refcase;
-                terms_.push_back(std::move(term));
-                pos = (plus == std::string::npos) ? std::string::npos : plus + 1;
-            }
-            if (terms_.empty()) {
-                OPM_THROW(std::runtime_error,
-                          "matchsum objective without terms");
-            }
-        } else {
-            OPM_THROW(std::runtime_error,
-                      "Unknown adjoint objective '" + spec + "'");
         }
+        for (const auto& ts : spec.terms) {
+            for (const auto& wellName : expandWells_(ts.wells, schedule)) {
+                RateTerm term;
+                term.well = wellName;
+                setPhase_(term, ts.phase);
+                term.type = ts.type;
+                term.weight = ts.weight;
+                term.targetRate = ts.targetRateSi;
+                term.referenceCase = ts.referenceCase;
+                term.windowStartDays = ts.windowStartDays;
+                term.windowEndDays = ts.windowEndDays;
+                term.windowExplicit = ts.windowExplicit;
+                term.label = termLabel_(term, ts.phase);
+                terms_.push_back(std::move(term));
+            }
+        }
+        termValues_.assign(terms_.size(), 0.0);
     }
 
     Kind kind() const
@@ -177,6 +344,15 @@ public:
 
     const std::vector<RateTerm>& rateTerms() const
     { return terms_; }
+
+    //! \brief Zero the per-term value accumulators (call before a sweep).
+    void resetTermValues() const
+    { std::fill(termValues_.begin(), termValues_.end(), 0.0); }
+
+    //! \brief Per-term accumulated objective values (local; reduce like J).
+    //!        Indexed like rateTerms(); empty for non-rate objectives.
+    const std::vector<Scalar>& termObjectiveValues() const
+    { return termValues_; }
 
     //! \brief True if the objective has well terms involving \p well.
     bool involvesWell(const std::string& well) const
@@ -220,12 +396,15 @@ public:
             const auto& wellState =
                 simulator.problem().wellModel().wellState();
             Scalar sum = 0.0;
-            for (const auto& term : terms_) {
+            for (std::size_t ti = 0; ti < terms_.size(); ++ti) {
+                const auto& term = terms_[ti];
                 const int phasePos =
                     FluidSystem::canonicalToActivePhaseIdx(term.canonicalPhaseIdx);
                 const Scalar q =
                     wellState.well(term.well).surface_rates[phasePos];
-                sum += termValue_(simulator, term, dt, q);
+                const Scalar v = termValue_(simulator, term, dt, q);
+                termValues_[ti] += v;
+                sum += v;
             }
             return sum;
         }
@@ -272,16 +451,18 @@ public:
     Scalar termWeight(const Simulator& simulator, const RateTerm& term,
                       double dt, Scalar q) const
     {
+        const Scalar tEnd = simulator.time() + dt;
+        if (!inWindow_(simulator, term, tEnd)) {
+            return 0.0;
+        }
         switch (term.type) {
         case TermType::Rate:
             return term.weight * dt;
         case TermType::MatchConst:
             return term.weight * 2.0 * dt * (q - term.targetRate);
-        case TermType::MatchRef: {
-            const Scalar tEnd = simulator.time() + dt;
+        case TermType::MatchRef:
             return term.weight * 2.0 * dt *
                    (q - observedRate_(simulator, term, tEnd));
-        }
         }
         return 0.0;
     }
@@ -290,6 +471,10 @@ private:
     Scalar termValue_(const Simulator& simulator, const RateTerm& term,
                       double dt, Scalar q) const
     {
+        const Scalar tEnd = simulator.time() + dt;
+        if (!inWindow_(simulator, term, tEnd)) {
+            return 0.0;
+        }
         switch (term.type) {
         case TermType::Rate:
             return term.weight * dt * q;
@@ -298,12 +483,25 @@ private:
             return term.weight * dt * diff * diff;
         }
         case TermType::MatchRef: {
-            const Scalar tEnd = simulator.time() + dt;
             const Scalar diff = q - observedRate_(simulator, term, tEnd);
             return term.weight * dt * diff * diff;
         }
         }
         return 0.0;
+    }
+
+    //! \brief Window check on the substep end time \p tEnd [s]. MatchRef
+    //!        terms load their observations first so a defaulted window
+    //!        (reference summary span) is in place before the check.
+    bool inWindow_(const Simulator& simulator, const RateTerm& term,
+                   Scalar tEnd) const
+    {
+        if (term.type == TermType::MatchRef && !term.loaded) {
+            loadObservations_(simulator, term);
+        }
+        const Scalar tEndDays = tEnd / 86400.0;
+        return tEndDays >= term.windowStartDays &&
+               tEndDays <= term.windowEndDays;
     }
 
     //! \brief Observed rate (internal sign/units) at time \p t [s].
@@ -365,22 +563,31 @@ private:
         // Convert the file's rate unit to internal SI (m3/s).
         const std::string unit = summary.get_unit(keyword);
         Scalar toSi;
-        if (unit == "SM3/DAY") {
+        if (unit == "SM3/DAY" || unit == "SM3/D" || unit == "M3/DAY") {
             toSi = 1.0 / 86400.0;
-        } else if (unit == "MSCF/DAY") {
+        } else if (unit == "MSCF/DAY" || unit == "MSCF/D") {
             toSi = 28.316846592 / 86400.0;   // 1 Mscf = 1000 ft^3
-        } else if (unit == "STB/DAY") {
+        } else if (unit == "STB/DAY" || unit == "STB/D") {
             toSi = 0.158987294928 / 86400.0;
         } else {
             OPM_THROW(std::runtime_error,
                       "Unsupported rate unit '" + unit +
-                      "' in reference summary for " + keyword);
+                      "' in reference summary for " + keyword +
+                      " (supported: SM3/DAY, MSCF/DAY, STB/DAY; reservoir-"
+                      "volume units like RM3/DAY are a different quantity)");
         }
 
         term.obsTimes.assign(time.begin(), time.end());
         term.obsValues.resize(rate.size());
         for (std::size_t i = 0; i < rate.size(); ++i) {
             term.obsValues[i] = sign * static_cast<Scalar>(rate[i]) * toSi;
+        }
+        // Without a user-given window, restrict the term to the span of the
+        // observed data: outside it there is no information, and a flat-
+        // extrapolated misfit would silently bias J.
+        if (!term.windowExplicit && !term.obsTimes.empty()) {
+            term.windowStartDays = term.obsTimes.front();
+            term.windowEndDays = term.obsTimes.back();
         }
         term.loaded = true;
     }
@@ -402,22 +609,41 @@ private:
         }
     }
 
-    static std::vector<std::string> split_(const std::string& text,
-                                           char sep, std::size_t expected)
+    //! \brief Expand exact names and shell patterns against the schedule;
+    //!        deduplicated, schedule-independent stable order (sorted).
+    static std::vector<std::string>
+    expandWells_(const std::vector<std::string>& entries,
+                 const Schedule& schedule)
     {
-        std::vector<std::string> parts;
-        std::size_t pos = 0;
-        while (parts.size() + 1 < expected) {
-            const auto next = text.find(sep, pos);
-            if (next == std::string::npos) {
-                OPM_THROW(std::runtime_error,
-                          "Malformed adjoint objective specification: " + text);
+        std::set<std::string> names;
+        for (const auto& entry : entries) {
+            if (entry.find_first_of("*?") != std::string::npos) {
+                const auto matches = schedule.wellNames(entry);
+                if (matches.empty()) {
+                    OPM_THROW(std::runtime_error,
+                              "Adjoint objective well pattern '" + entry +
+                              "' matches no well in the schedule");
+                }
+                names.insert(matches.begin(), matches.end());
+            } else {
+                if (!schedule.hasWell(entry)) {
+                    OPM_THROW(std::runtime_error,
+                              "Adjoint objective well '" + entry +
+                              "' is not in the schedule");
+                }
+                names.insert(entry);
             }
-            parts.push_back(text.substr(pos, next - pos));
-            pos = next + 1;
         }
-        parts.push_back(text.substr(pos));
-        return parts;
+        return {names.begin(), names.end()};
+    }
+
+    static std::string termLabel_(const RateTerm& term,
+                                  const std::string& phase)
+    {
+        const char* type = term.type == TermType::Rate ? "rate"
+                         : term.type == TermType::MatchConst ? "match"
+                         : "matchref";
+        return std::string(type) + ":" + term.well + ":" + phase;
     }
 
     //! \brief Global number of interior cells (cached), for the
@@ -441,6 +667,7 @@ private:
     Kind kind_{Kind::PressureAverage};
     std::string wellName_{};           //!< bhp objective
     std::vector<RateTerm> terms_;      //!< rate-family objectives
+    mutable std::vector<Scalar> termValues_;  //!< per-term J accumulators
     const AdjointParallel<TypeTag>* par_{nullptr};
     mutable Scalar globalNumCells_cached_{-1};
 };
