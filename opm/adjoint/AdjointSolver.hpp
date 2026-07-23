@@ -735,7 +735,7 @@ private:
         const std::size_t numCells = simulator_.model().numGridDof();
         AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
         using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
-        const Scalar h = 1e-7; // multiplier is O(1), so an absolute step
+        const Scalar h = config_.fdStep; // multiplier is O(1): absolute step
         EqVec resPlus(0.0);
         EqVec resMinus(0.0);
         for (std::size_t i = 0; i < numCells; ++i) {
@@ -803,7 +803,7 @@ private:
         ensureFaces_();
         AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
         using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
-        const Scalar h = 1e-7;
+        const Scalar h = config_.fdStep;
         EqVec rIp(0.0), rIm(0.0), rJp(0.0), rJm(0.0);
         for (std::size_t f = 0; f < faces_.size(); ++f) {
             const unsigned globI = static_cast<unsigned>(faces_[f].first);
@@ -897,7 +897,7 @@ private:
         const std::size_t numCells = simulator_.model().numGridDof();
         AdjointResidualEvaluator<TypeTag> evaluator(simulator_);
         using EqVec = typename AdjointResidualEvaluator<TypeTag>::EqVector;
-        const Scalar h = 1e-7;
+        const Scalar h = config_.fdStep;
         EqVec rP(0.0), rM(0.0);
 
         for (std::size_t c = 0; c < numCells; ++c) {
@@ -1056,7 +1056,7 @@ private:
             return value;
         };
 
-        const Scalar h = 1e-7;
+        const Scalar h = config_.fdStep;
         for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
             const auto& def = *endpointDefs_[p];
             for (unsigned i = 0; i < numCells; ++i) {

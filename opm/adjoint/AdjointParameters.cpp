@@ -35,6 +35,7 @@ AdjointConfig AdjointConfig::fromParameters()
     config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
     config.residualEvalCheck = Parameters::Get<Parameters::AdjointResidualEvalCheck>();
     config.gradientMethod = Parameters::Get<Parameters::AdjointGradientMethod>();
+    config.fdStep = Parameters::Get<Parameters::AdjointFdStep>();
     config.objective = Parameters::Get<Parameters::AdjointObjective>();
     config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
     config.linearSolver = Parameters::Get<Parameters::AdjointLinearSolver>();
@@ -92,6 +93,10 @@ void registerAdjointParameters()
          "forms, default), 'general' (stencil-local re-evaluation via the "
          "residual evaluator, finite difference), or 'general-ad' (the same "
          "stencil-local mechanism with seeded AD, exact dR/dθ in one pass)");
+    Parameters::Register<Parameters::AdjointFdStep>
+        ("Central-difference step for the finite-difference gradient paths "
+         "('general' multiplier perturbations and end-point gradients); "
+         "the exact 'general-ad' path ignores it");
 }
 
 } // namespace Opm

@@ -94,6 +94,12 @@ struct AdjointResidualEvalCheck { static constexpr bool value = false; };
 //!        all parameters in one backward sweep).
 struct AdjointGradientMethod { static constexpr auto value = "analytic"; };
 
+//! \brief Central-difference step for the finite-difference gradient
+//!        paths (the 'general' method's multiplier perturbations and the
+//!        end-point gradients). Relative to O(1) multipliers; the exact
+//!        'general-ad' path does not use it.
+struct AdjointFdStep { static constexpr double value = 1e-7; };
+
 } // namespace Opm::Parameters
 
 namespace Opm {
@@ -110,6 +116,7 @@ struct AdjointConfig
     double replayAbsTolerance{1e-9};
     bool residualEvalCheck{false}; //!< verify the standalone residual evaluator
     std::string gradientMethod{"analytic"}; //!< "analytic" or "general"
+    double fdStep{1e-7};      //!< central-difference step for FD gradients
     std::string objective{};  //!< objective specification
     std::string endpoints{};  //!< end-point parameter list
     std::string linearSolver{};  //!< adjoint linear solver spec
