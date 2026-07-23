@@ -44,8 +44,11 @@
 #define OPM_ADJOINT_OBJECTIVE_HPP
 
 #include <opm/common/ErrorMacros.hpp>
+#include <opm/common/OpmLog/OpmLog.hpp>
 
 #include <opm/io/eclipse/ESmry.hpp>
+
+#include <fmt/format.h>
 
 #include <opm/models/utils/propertysystem.hh>
 
@@ -85,6 +88,7 @@ public:
         std::string referenceCase{};   //!< MatchRef
         // observed curve (lazily loaded)
         mutable bool loaded{false};
+        mutable bool clampWarned{false};        //!< out-of-window warning shown
         mutable std::vector<Scalar> obsTimes;   //!< days
         mutable std::vector<Scalar> obsValues;  //!< internal units/sign
     };
@@ -314,11 +318,20 @@ private:
         if (times.empty()) {
             OPM_THROW(std::runtime_error, "Empty observed curve");
         }
-        if (tDays <= times.front()) {
-            return term.obsValues.front();
-        }
-        if (tDays >= times.back()) {
-            return term.obsValues.back();
+        if (tDays <= times.front() || tDays >= times.back()) {
+            // Flat extrapolation outside the reference window silently
+            // biases the misfit; say so once per term.
+            if (!term.clampWarned) {
+                term.clampWarned = true;
+                OpmLog::warning(fmt::format(
+                    "Adjoint matchref: simulation time {:.4g} days is outside "
+                    "the reference summary window [{:.4g}, {:.4g}] days for "
+                    "well {}; the observed rate is held constant there "
+                    "(flat extrapolation)",
+                    tDays, times.front(), times.back(), term.well));
+            }
+            return tDays <= times.front() ? term.obsValues.front()
+                                          : term.obsValues.back();
         }
         const auto it = std::upper_bound(times.begin(), times.end(), tDays);
         const std::size_t hi = it - times.begin();

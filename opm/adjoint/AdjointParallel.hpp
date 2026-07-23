@@ -39,6 +39,8 @@
 #ifndef OPM_ADJOINT_PARALLEL_HPP
 #define OPM_ADJOINT_PARALLEL_HPP
 
+#include <opm/common/ErrorMacros.hpp>
+
 #include <opm/models/utils/propertysystem.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 
@@ -102,6 +104,12 @@ public:
                                              parallelInformation_);
         const auto* parinfo =
             std::any_cast<ParallelISTLInformation>(&parallelInformation_);
+        if (!parinfo) {
+            OPM_THROW(std::runtime_error,
+                      "Adjoint parallel setup: the grid manager did not "
+                      "provide ParallelISTLInformation (only CpGrid-style "
+                      "grids are supported for parallel adjoint runs)");
+        }
         parinfo->copyValuesTo(istlComm_->indexSet(),
                               istlComm_->remoteIndices(), numCells, 1);
 
