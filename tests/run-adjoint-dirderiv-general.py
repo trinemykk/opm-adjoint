@@ -54,9 +54,20 @@ STRICT = ["--enable-storage-cache=false", "--enable-adaptive-time-stepping=false
           "--tolerance-mb=1e-12", "--tolerance-mb-relaxed=1e-12",
           f"--adjoint-objective={objective}"]
 
+DARCY = 9.869232667160128e-16  # 1 mD in m^2
 FAMILY = {
-    # perturb pv-multiplier via MULTPV; gradient file already in that basis.
-    "pv": dict(grad="ADJOINT_GRADIENTS_PV.txt", col=0, keyword="MULTPV"),
+    # kind "multpv": perturb the pv-multiplier via a standalone MULTPV field
+    #   (base multiplier is 1, so the gradient is already in the perturbation
+    #   basis). kind "array": perturb a deck field (e.g. PERMX) multiplicatively
+    #   by rewriting its array; the gradient (SI) maps to the multiplier basis
+    #   as g_i * base_i * gscale.
+    "pv":   dict(grad="ADJOINT_GRADIENTS_PV.txt",   gcol=0, kind="multpv"),
+    # PERM masks perforated cells: the cell-based perm gradient there is missing
+    # the dCTF/dK well term (defaulted CTF; task B1), so it is knowingly wrong at
+    # perforations. Masking them tests the RESERVOIR perm gradient (exact) at
+    # scale without depending on the B1 fix; drop the mask once B1 lands.
+    "perm": dict(grad="ADJOINT_GRADIENTS_PERM.txt", gcol=0, kind="array",
+                 keyword="PERMX", gscale=DARCY, mask_perf=True),
 }
 if family not in FAMILY:
     print(f"unsupported family '{family}' (have: {', '.join(FAMILY)})"); sys.exit(2)
@@ -78,8 +89,8 @@ def read_grad_col(path, col):
             pass
     return vals
 
-def deck_dimens(dirpath):
-    """nx*ny*nz from DIMENS, scanning the deck and its .INC/.GRDECL files."""
+def deck_dims(dirpath):
+    """(nx, ny, nz) from DIMENS, scanning the deck and its .INC/.GRDECL files."""
     for root, _, files in os.walk(dirpath):
         for fn in files:
             if not fn.upper().endswith((".DATA", ".INC", ".GRDECL")):
@@ -88,8 +99,39 @@ def deck_dimens(dirpath):
             m = re.search(r"^\s*DIMENS\s*\n\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)",
                           txt, re.MULTILINE)
             if m:
-                return int(m[1]) * int(m[2]) * int(m[3])
+                return int(m[1]), int(m[2]), int(m[3])
     raise RuntimeError("DIMENS not found in deck")
+
+def perforated_cells(dirpath, dims):
+    """Cartesian indices of COMPDAT connections (explicit I J K1 K2), so the
+    perm test can skip cells whose gradient needs the dCTF/dK well term."""
+    nx, ny, _ = dims
+    cells = set()
+    for p in deck_file_chain(dirpath, deck_name):
+        lines = open(p, errors="ignore").read().splitlines()
+        i = 0
+        while i < len(lines):
+            if lines[i].strip().upper().startswith("COMPDAT"):
+                for j in range(i + 1, len(lines)):
+                    s = lines[j].split("--")[0].strip()
+                    if s.startswith("/") or not s:
+                        if s.startswith("/"):
+                            break
+                        continue
+                    toks = s.rstrip("/").split()
+                    # 'WELL' I J K1 K2 ... ; skip if I/J defaulted (1*)
+                    if len(toks) >= 5 and toks[1] not in ("1*", "*") \
+                       and toks[2] not in ("1*", "*"):
+                        try:
+                            I, J, K1, K2 = (int(toks[1]), int(toks[2]),
+                                            int(toks[3]), int(toks[4]))
+                        except ValueError:
+                            continue
+                        for K in range(K1, K2 + 1):
+                            cells.add((I-1) + (J-1)*nx + (K-1)*nx*ny)
+                i = j
+            i += 1
+    return cells
 
 def deck_file_chain(dirpath, main_name):
     """Files (main deck + transitive INCLUDEs) belonging to this deck, so we
@@ -109,7 +151,7 @@ def deck_file_chain(dirpath, main_name):
 def inject_multpv(dstdir, main_name, values):
     """Insert 'MULTPV <values> /' at the end of the GRID section, in whichever
     file of THIS deck's include chain holds the GRID keyword."""
-    body = spec["keyword"] + "\n" + \
+    body = "MULTPV\n" + \
            "\n".join(" ".join(f"{v:.10f}" for v in values[i:i+8])
                      for i in range(0, len(values), 8)) + "\n/\n"
     for p in deck_file_chain(dstdir, main_name):
@@ -124,6 +166,69 @@ def inject_multpv(dstdir, main_name, values):
         open(p, "w").writelines(lines)
         return
     raise RuntimeError("GRID section not found in deck's include chain")
+
+def parse_array(dstdir, keyword):
+    """Per-cell values of an ECL keyword array (expands N*val, skips comments)
+    from THIS deck's include chain. Returns None if not found."""
+    for p in deck_file_chain(dstdir, deck_name):
+        lines = open(p, errors="ignore").read().splitlines()
+        i = next((k for k, l in enumerate(lines)
+                  if l.strip().upper() == keyword), None)
+        if i is None:
+            continue
+        vals = []
+        for j in range(i + 1, len(lines)):
+            s = lines[j].split("--")[0].strip()
+            if not s:
+                continue
+            done = s.endswith("/")
+            for tok in s.rstrip("/").split():
+                if "*" in tok:
+                    c, v = tok.split("*"); vals += [float(v)] * int(c)
+                else:
+                    vals.append(float(tok))
+            if done:
+                break
+        return vals
+    return None
+
+def array_body(keyword, values):
+    return keyword + "\n" + \
+           "\n".join(" ".join(f"{v:.8f}" for v in values[i:i+8])
+                     for i in range(0, len(values), 8)) + "\n/\n"
+
+def ensure_array(dstdir, keyword, values):
+    r"""Set a keyword array to `values`: rewrite it in place if present, else
+    inject it at the end of the GRID section (for fields that default, e.g.
+    PERMY/PERMZ following PERMX — pinning them isolates the PERMX perturbation)."""
+    body = array_body(keyword, values)
+    for p in deck_file_chain(dstdir, deck_name):
+        lines = open(p, errors="ignore").read().splitlines(keepends=True)
+        i = next((k for k, l in enumerate(lines)
+                  if l.strip().upper() == keyword), None)
+        if i is None:
+            continue
+        j = i + 1
+        while j < len(lines) and "/" not in lines[j].split("--")[0]:
+            j += 1
+        lines[i:j+1] = [body]
+        open(p, "w").writelines(lines)
+        return
+    inject_in_grid(dstdir, body)
+
+def inject_in_grid(dstdir, body):
+    for p in deck_file_chain(dstdir, deck_name):
+        lines = open(p, errors="ignore").read().splitlines(keepends=True)
+        grid_at = next((i for i, l in enumerate(lines)
+                        if l.strip().upper() == "GRID"), None)
+        if grid_at is None:
+            continue
+        end = next((i for i in range(grid_at + 1, len(lines))
+                    if lines[i].strip().upper() in SECTIONS), len(lines))
+        lines.insert(end, body)
+        open(p, "w").writelines(lines)
+        return
+    raise RuntimeError("GRID section not found for array injection")
 
 def run(deckdir, save):
     deck = os.path.join(deckdir, f"{deck_name}.DATA")
@@ -156,8 +261,9 @@ subprocess.run([flow, os.path.join(base, f"{deck_name}.DATA"),
 gradpath = os.path.join(base, f"{deck_name}.{spec['grad']}")
 if not os.path.exists(gradpath):
     print("no gradient file"); sys.exit(1)
-g = read_grad_col(gradpath, spec["col"])
-ncell = deck_dimens(deck_dir)
+g = read_grad_col(gradpath, spec["gcol"])
+dims = deck_dims(deck_dir)
+ncell = dims[0] * dims[1] * dims[2]
 n = len(g)
 print(f"deck={deck_name} family={family} objective={objective}")
 print(f"  {n} gradient rows, grid {ncell} cells, eps={eps}, reltol={reltol}")
@@ -166,16 +272,51 @@ if n != ncell:
           f"supports all-active decks only (add an ACTNUM->cartesian map)")
     sys.exit(1)
 
+# Per-family base field and gradient mapped to the perturbation-multiplier
+# basis, so g_basis·d is comparable to the FD of a (1 + eps·d) perturbation.
+perm_pin = []   # (keyword, base) for PERMY/PERMZ, pinned so only PERMX varies
+if spec["kind"] == "multpv":
+    base_vals = [1.0] * n
+    g_basis   = g                                   # already dJ/d(pvmult)
+else:  # array (perm): perturb PERMX only, pin PERMY/PERMZ to isolate dJ/dKx
+    base_vals = parse_array(deck_dir, spec["keyword"])
+    if base_vals is None or len(base_vals) != n:
+        got = 0 if base_vals is None else len(base_vals)
+        print(f"FAIL: could not parse {spec['keyword']} array ({got} vs {n} "
+              f"cells) — field may use COPY/BOX (not yet supported)")
+        sys.exit(1)
+    # PERMY/PERMZ default to PERMX when absent; rewriting PERMX would move them
+    # too. Pin each to its base (parsed, or PERMX if it defaults) so the FD is
+    # purely dJ/dPERMX, matching gradient column 0.
+    for kw in ("PERMY", "PERMZ"):
+        b = parse_array(deck_dir, kw)
+        perm_pin.append((kw, b if (b and len(b) == n) else base_vals))
+    # dJ/d(mult_i) = dJ/dPERMX_i[SI] * PERMX_i[m^2]; PERMX_i[m^2]=base*gscale
+    g_basis = [gi * bi * spec["gscale"] for gi, bi in zip(g, base_vals)]
+
+def apply_perturbation(dd, mult):
+    if spec["kind"] == "multpv":
+        inject_multpv(dd, deck_name, mult)
+    else:
+        ensure_array(dd, spec["keyword"], [b * m for b, m in zip(base_vals, mult)])
+        for kw, b in perm_pin:
+            ensure_array(dd, kw, b)
+
+# Cells to hold fixed (d = 0): perforations for perm (dCTF/dK gap, task B1).
+masked = perforated_cells(deck_dir, dims) if spec.get("mask_perf") else set()
+if masked:
+    print(f"  masking {len(masked)} perforated cell(s) (perm dCTF/dK gap, B1)")
+
 rng = random.Random(seed)
 ok = True
 for k in range(ndir):
-    d = [rng.uniform(-1.0, 1.0) for _ in range(n)]
-    gd = sum(gi * di for gi, di in zip(g, d))
+    d = [0.0 if i in masked else rng.uniform(-1.0, 1.0) for i in range(n)]
+    gd = sum(gb * di for gb, di in zip(g_basis, d))
     Js = {}
     for sgn, tag in ((+1, "p"), (-1, "m")):
         dd = os.path.join(outdir, f"dir{k}_{tag}")
         shutil.rmtree(dd, ignore_errors=True); shutil.copytree(deck_dir, dd)
-        inject_multpv(dd, deck_name, [1.0 + sgn * eps * di for di in d])
+        apply_perturbation(dd, [1.0 + sgn * eps * di for di in d])
         Js[tag] = objective_J(dd)
     fd = (Js["p"] - Js["m"]) / (2.0 * eps)
     rel = abs(gd - fd) / max(abs(gd), abs(fd), 1e-300)
