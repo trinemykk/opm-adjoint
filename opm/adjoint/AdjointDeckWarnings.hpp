@@ -44,6 +44,7 @@
 
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
 #include <opm/input/eclipse/Schedule/OilVaporizationProperties.hpp>
+#include <opm/input/eclipse/Schedule/Well/Connection.hpp>
 
 #include <fmt/format.h>
 
@@ -147,6 +148,34 @@ inline void warnAdjointDeckApproximations(const Simulator& simulator)
             "from well potentials; the converged guide rates are restored so "
             "replay is exact, but the d(guide-rate)/d(state) cross-term in "
             "dJ/dm is neglected");
+    }
+
+    // --- permeability-derived well connection factors ---
+    // A defaulted CTF (COMPDAT item 8) is computed from the cell
+    // permeability (Peaceman, Kh), so dJ/dperm has a contribution through
+    // the well equations (dCTF/dK) that the cell-based perm gradient does
+    // not include. Flag when any connection is perm-derived.
+    bool ctfFromPerm = false;
+    for (std::size_t i = 0; i < nstep && !ctfFromPerm; ++i) {
+        for (const auto& wname : schedule.wellNames(i)) {
+            const auto& well = schedule.getWell(wname, i);
+            for (const auto& conn : well.getConnections()) {
+                if (conn.kind() == Connection::CTFKind::Defaulted) {
+                    ctfFromPerm = true;
+                    break;
+                }
+            }
+            if (ctfFromPerm) {
+                break;
+            }
+        }
+    }
+    if (ctfFromPerm) {
+        approxGradient.emplace_back(
+            "permeability-derived well connection factors (defaulted CTF)",
+            "the connection transmissibility factor is computed from the "
+            "cell permeability (Peaceman/Kh), so dJ/dperm has a well-equation "
+            "contribution dCTF/dK that the cell-based perm gradient neglects");
     }
 
     // --- neglected entirely ---
