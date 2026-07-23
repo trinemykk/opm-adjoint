@@ -139,50 +139,66 @@ PERMX multiplier FD vs adjoint `general-ad`, h=1e-2, cnv 1e-9):
 Same picture with `bhp:PROD` (prod-perf gap 94.3 %). **Decision: the well-row
 perm term (λ·dR/dCTF·dCTF/dK) is mandatory for perm history matching** — at
 drawdown-limited producer perforations the cell-based perm gradient is ~20×
-too small. It is negligible for rate-controlled injectors (delivery not
-CTF-limited). Secondary observation: with well objectives on mode-switching
-decks there is an additional ~4–6 % systematic FD-vs-adjoint deviation on all
-cells (control-switch kinks, the documented v1 approximation) — visible with
-`bhp:PROD`, absent with `pressure-average`.
+too small. It is negligible for rate-controlled injectors (delivery not CTF-limited).
 
-### Well-objective gradient deviation QUANTIFIED (2026-07-23): the neglected
-### cross-step well explicit-quantities term is the cause — up to ~9 %
+### Well-objective (bhp) gradient deviation on SPE1 — INVESTIGATED 2026-07-23
 
-Random-direction test (all 300 PORO multipliers, fixed seed, FD (J+−J−)/2ε vs
-adjoint g·d, SPE1CASE1, ε-stable at 1e-3/1e-2 → real, not FD noise):
+A ~3 % (single-cell) / ~6–9 % (aggregate) FD-vs-adjoint deviation appears for
+the **bhp objective** on SPE1CASE1 (`pressure-average` and `rate:oil` are
+accurate). Investigation scripts: `tests/run-adjoint-dirderiv-wellobj.sh`
+(random-direction over all 300 PORO), plus single-cell ε/datum sweeps.
 
-| objective (window in days) | rel. deviation | note |
+| objective (window, days) | rel. deviation | reading |
 |---|---|---|
-| `bhp:PROD` t∈[1100,∞) — BHP-controlled period | **0 (exact)** | BHP pinned ⇒ both sides zero |
-| `bhp:PROD` t∈[0,100] | 0.8 % | short window, small depletion |
-| `bhp:PROD` t∈[0,300] | 7.9 % | grows with trajectory length |
-| `bhp:PROD` t∈[0,900] — pure ORAT, no switch | **8.8 %** | worse than full run ⇒ NOT switch kinks |
 | `bhp:PROD` full run | 6.1 % | |
+| `bhp:PROD` t∈[0,900] (pure ORAT, no switch) | 8.8 % | error is in the ORAT period |
+| `bhp:PROD` t∈[1100,∞) (BHP-controlled) | **0 (exact)** | BHP pinned ⇒ dJ=0 |
+| `bhp:PROD` t∈[0,100] / [0,300] | 0.8 % / 7.9 % | grows as free gas evolves |
+| single non-perf cell (5,5,2), bhp:PROD | 2.94 % | ε-flat 4e-2…1e-3 |
 | `rate:PROD:gas` t∈[0,900] | 1.5 % | |
-| `rate:PROD:oil` (both windows) | 0.1–0.5 % | rate pinned in ORAT period |
+| `rate:PROD:oil` | 0.1–0.5 % | oil pinned to ORAT target |
+| `pressure-average` | 0.2 % | (its dirderiv value is FD-noise) |
 
-**Control-switch kinks are NOT the cause** (a switch happens exactly when the
-constraint is hit, so BHP/rates are continuous — J is C1 there; confirmed by
-the pure-mode windows). The cause is the already-warned `[approx-gradient]
-well explicit quantities` item: `calculateExplicitQuantities` (first Newton
-iteration of every substep, `StandardWell_impl.hpp:1444`) freezes connection
-hydrostatic pressure drops / wellbore-storage `F0` / explicit B-factors
-computed from `(x_{k-1}, xw_{k-1})`, so `R_w(x_k, xw_k; E(x_{k-1}, xw_{k-1}))`
-— and the backward recursion's cross-substep coupling (Bdiag) carries only the
-reservoir storage block, not `dR_w(k)/d(x_{k-1}, xw_{k-1})` through E. The
-magnitude was never known; it is **material for BHP objectives (~6–9 %) and
-noticeable for gas-rate matching (~1.5 %)** on a depleting DISGAS deck.
+**Ruled OUT — the well explicit-quantities term (`calculateExplicitQuantities`:
+connection Δp / wellbore-storage F0 / explicit B) is NOT the cause**, three
+independent ways:
+1. SPE1's PROD/INJ datum depths (8400/8335) equal their connection-cell
+   centres, so `perf_pressure_diffs_` ≈ 0; SPE1 has no wellbore volume ⇒ F0/
+   `computeAccumWell` inert. `calculateExplicitQuantities` has no cross-step
+   effect here, yet the deviation is 2.94 %.
+2. Shifting the PROD datum to 8335 (65 ft head, activating the term) leaves the
+   deviation unchanged (2.94 % → 2.59 %).
+3. **Ruled OUT — non-differentiability / DISGAS variable-switching kinks**: the
+   deviation is ε-flat to 5 sig-figs across ε 4e-2…1e-3 (a kink shrinks as
+   ε→0). It is a *smooth* systematic error.
 
-Fix sketch (planned as stage **W1**): during the sweep at substep k, per well
-and perforation, perturb the connection cell's `x_{k-1}` components (and the
-well's `xw_{k-1}`), rebuild E + the well residual (connection-cell IQ rebuild
-via the public `update()` — the endpoint-stencil machinery), contract with
-`λ_w(k)`, and add the result to the substep-(k-1) adjoint RHS (reservoir rows)
-and to the k-1 well elimination (well rows). Cost per substep: per well,
-numPerf×numEq (+numWellEq) small FD assemblies — cheap for StandardWells;
-AD-seeded later. Until then `bhp:` objectives should be used with the
-documented caveat; rate-matching (`matchref`) objectives are the least
-affected (oil ≲0.5 %, gas ~1.5 % on SPE1).
+**What it is (leading hypothesis, not yet root-caused).** With a bitwise
+Jacobian, a smooth error means the adjoint differentiates a slightly different
+function than forward J(θ) in the **well-coupling path**: it is confined to the
+ORAT period where BHP is a *free* primary variable, probes the Bhp column of
+`D⁻ᵀ` (a direction `rate:oil` — the control-eq-row direction — never
+exercises), routes entirely through the well (so it hits an arbitrary
+non-perforated cell via λ_res), and grows with free-gas evolution near the
+producer. Note the replay bitwise check verifies the **reservoir** Jacobian
+only; the well matrices D/B/C used by `computeWellAdjoints_` come from
+`assembleWellEqGivenControls` in replay and are **not** bitwise-verified — a
+DISGAS-dependent inconsistency there fits every symptom. m1d (also DISGAS+
+VAPOIL, ORAT producer) matches bhp×PV at 4e-9, but is 7 calm substeps with no
+strong gas evolution. **Next diagnostic (task W1, reframed):** add a well-matrix
+(D/B/C) bitwise check to replay and compare forward vs replay for a DISGAS
+producer; expect the discrepancy to surface there. Until resolved, prefer
+`matchref` rate objectives for HM (oil ≲0.5 %, gas ~1.5 %); `bhp:` carries the
+documented caveat.
+
+### Multisegment wells — NOT supported for gradients (2026-07-23)
+
+MSW decks (`SPE1CASE2_MSW`) **replay bitwise** (120/120, reservoir side), but
+any gradient with a well objective aborts: `addWellObjectiveRhs_` throws
+"Adjoint well objectives support StandardWells only" (`AdjointSolver.hpp:415`),
+because every well-adjoint path `dynamic_cast`s to `StandardWell` and MSW is a
+`MultisegmentWell`. Well-control and well-objective gradients for MSW are a
+separate implementation task (the segment system needs its own D/B/C
+elimination). A small MSW gradient test is gated on that support.
 
 ### Known gaps / queue (low priority, none blocking)
 
