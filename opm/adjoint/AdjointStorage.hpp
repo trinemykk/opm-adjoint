@@ -51,6 +51,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -153,6 +154,59 @@ private:
     Mode m_mode;
 };
 
+//! \brief In-memory archive backend: same MemPacker packing as the directory
+//!        store, but datasets live in a RAM map (group+"/"+dset -> buffer)
+//!        instead of files. Used by one-stop mode so a forward record and the
+//!        backward sweep share the states in the same process with no file IO.
+//!        Serial only; not mode-distinguished (write stores, read retrieves).
+class AdjointMemStore : public Serializer<Serialization::MemPacker>
+{
+public:
+    AdjointMemStore()
+        : Serializer<Serialization::MemPacker>(m_packer_priv)
+    {}
+
+    template<class T>
+    void write(T& data, const std::string& group, const std::string& dset)
+    {
+        this->pack(data);
+        m_store[key(group, dset)] = m_buffer;   // copy the packed bytes
+    }
+
+    template<class T>
+    void read(T& data, const std::string& group, const std::string& dset)
+    {
+        const auto it = m_store.find(key(group, dset));
+        if (it == m_store.end()) {
+            OPM_THROW(std::runtime_error,
+                      "Adjoint in-memory archive: missing dataset " +
+                      key(group, dset));
+        }
+        m_buffer = it->second;
+        this->unpack(data);
+    }
+
+    bool hasDataset(const std::string& group, const std::string& dset) const
+    {
+        return m_store.contains(key(group, dset));
+    }
+
+    void writeText(const std::string& group, const std::string& name,
+                   const std::string& text)
+    {
+        m_text[key(group, name)] = text;
+    }
+
+private:
+    static std::string key(const std::string& group, const std::string& dset)
+    {
+        return group + "/" + dset;
+    }
+    const Serialization::MemPacker m_packer_priv{};
+    std::map<std::string, std::vector<char>> m_store;
+    std::map<std::string, std::string> m_text;
+};
+
 //! \brief Backend-dispatching archive for adjoint state.
 class AdjointArchive
 {
@@ -196,6 +250,15 @@ public:
         }
     }
 
+    //! \brief In-memory archive (one-stop): RAM-backed, no files. Shared by
+    //!        the forward recorder and the backward solver in one process.
+    static std::shared_ptr<AdjointArchive> makeInMemory()
+    {
+        auto a = std::shared_ptr<AdjointArchive>(new AdjointArchive());
+        a->mem_ = std::make_unique<AdjointMemStore>();
+        return a;
+    }
+
     static bool isHdf5Path(const std::string& path)
     {
         return path.size() >= 3 &&
@@ -218,6 +281,7 @@ public:
     template<class T>
     void write(T& data, const std::string& group, const std::string& dset)
     {
+        if (mem_) { mem_->write(data, group, dset); return; }
 #if HAVE_HDF5
         if (hdf5_) {
             hdf5_->write(data, group, dset);
@@ -230,6 +294,7 @@ public:
     template<class T>
     void read(T& data, const std::string& group, const std::string& dset)
     {
+        if (mem_) { mem_->read(data, group, dset); return; }
 #if HAVE_HDF5
         if (hdf5_) {
             hdf5_->read(data, group, dset);
@@ -245,6 +310,7 @@ public:
                    const std::string& name,
                    const std::string& text)
     {
+        if (mem_) { mem_->writeText(group, name, text); return; }
 #if HAVE_HDF5
         if (hdf5_) {
             // Stored as a regular (string) dataset in the HDF5 backend.
@@ -265,11 +331,16 @@ public:
 #endif
     }
 
+    bool inMemory() const { return static_cast<bool>(mem_); }
+
 private:
+    AdjointArchive() = default;  //!< in-memory backend via makeInMemory()
+
 #if HAVE_HDF5
     std::unique_ptr<HDF5Serializer> hdf5_;
 #endif
     std::unique_ptr<AdjointRawDirSerializer> raw_;
+    std::unique_ptr<AdjointMemStore> mem_;
 };
 
 } // namespace Opm

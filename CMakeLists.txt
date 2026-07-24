@@ -252,6 +252,12 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-field-output-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/field_output_spe1)
+    # One-stop (forward + backward in one process, in-memory archive) ==
+    # two-process, byte-identical gradients, no state files.
+    add_test(NAME adjoint_onestop_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-onestop-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/onestop_spe1)
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>

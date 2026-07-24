@@ -54,19 +54,33 @@ class AdjointRecorder
 public:
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
 
+    //! \brief Owning recorder: creates the archive from the config path.
     explicit AdjointRecorder(Simulator& simulator)
+        : AdjointRecorder(simulator, nullptr)
+    {}
+
+    //! \brief One-stop recorder: records into a shared (in-memory) archive so
+    //!        the backward sweep in the same process reads the states directly.
+    AdjointRecorder(Simulator& simulator,
+                    std::shared_ptr<AdjointArchive> injectedArchive)
         : simulator_(simulator)
         , config_(AdjointConfig::fromParameters())
     {
-        std::string path = config_.path;
-        if (path.empty()) {
-            const auto& ioConfig = simulator_.vanguard().eclState().getIOConfig();
-            path = AdjointArchive::defaultPath(ioConfig.getOutputDir(),
-                                               simulator_.vanguard().caseName());
+        std::string path;
+        if (injectedArchive) {
+            archive_ = std::move(injectedArchive);
+            path = "(in-memory, one-stop)";
+        } else {
+            path = config_.path;
+            if (path.empty()) {
+                const auto& ioConfig = simulator_.vanguard().eclState().getIOConfig();
+                path = AdjointArchive::defaultPath(ioConfig.getOutputDir(),
+                                                   simulator_.vanguard().caseName());
+            }
+            archive_ = std::make_shared<AdjointArchive>(
+                path, AdjointArchive::Mode::Write,
+                simulator_.vanguard().gridView().comm());
         }
-        archive_ = std::make_unique<AdjointArchive>(
-            path, AdjointArchive::Mode::Write,
-            simulator_.vanguard().gridView().comm());
 
         meta_.systemSaved = config_.saveSystem;
         meta_.storageCacheEnabled = Parameters::Get<Parameters::EnableStorageCache>();
@@ -74,8 +88,9 @@ public:
         meta_.caseName = simulator_.vanguard().caseName();
 
         checkConfiguration_();
-        OpmLog::info("Adjoint recording enabled; archive: " + path +
-                     (archive_->usesHdf5() ? " (HDF5)" : " (directory store)"));
+        const char* backend = archive_->inMemory() ? "" :
+                              (archive_->usesHdf5() ? " (HDF5)" : " (directory store)");
+        OpmLog::info("Adjoint recording enabled; archive: " + path + backend);
         if (config_.slim) {
             OpmLog::info("Adjoint slim archive: per-substep snapshots omit the "
                          "static schedule (reconstructed from the deck at "
@@ -208,7 +223,7 @@ private:
 
     Simulator& simulator_;
     AdjointConfig config_;
-    std::unique_ptr<AdjointArchive> archive_;
+    std::shared_ptr<AdjointArchive> archive_;
     AdjointMeta meta_;
 };
 

@@ -105,9 +105,16 @@ public:
     using Vector = Dune::BlockVector<Dune::FieldVector<Scalar, numEq>>;
 
     explicit AdjointSolver(Simulator& simulator)
+        : AdjointSolver(simulator, nullptr)
+    {}
+
+    //! \brief One-stop solver: read the recorded states from a shared
+    //!        (in-memory) archive filled by the forward run in this process.
+    AdjointSolver(Simulator& simulator,
+                  std::shared_ptr<AdjointArchive> injectedArchive)
         : simulator_(simulator)
         , config_(AdjointConfig::fromParameters())
-        , replay_(simulator)
+        , replay_(simulator, std::move(injectedArchive))
         , parallel_(simulator)
         , objective_(config_.objectiveSpec
                          ? *config_.objectiveSpec

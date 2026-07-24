@@ -82,6 +82,13 @@ public:
                      .jacobian().istlMatrix())>;
 
     explicit AdjointReplay(Simulator& simulator)
+        : AdjointReplay(simulator, nullptr)
+    {}
+
+    //! \brief One-stop replay: read from a shared (in-memory) archive that the
+    //!        forward recorder in the same process just filled.
+    AdjointReplay(Simulator& simulator,
+                  std::shared_ptr<AdjointArchive> injectedArchive)
         : simulator_(simulator)
         , config_(AdjointConfig::fromParameters())
     {
@@ -92,15 +99,20 @@ public:
                       "forward run with the same option).");
         }
 
-        std::string path = config_.path;
-        if (path.empty()) {
-            const auto& ioConfig = simulator_.vanguard().eclState().getIOConfig();
-            path = AdjointArchive::defaultPath(ioConfig.getOutputDir(),
-                                               simulator_.vanguard().caseName());
+        std::string path = "(in-memory, one-stop)";
+        if (injectedArchive) {
+            archive_ = std::move(injectedArchive);
+        } else {
+            path = config_.path;
+            if (path.empty()) {
+                const auto& ioConfig = simulator_.vanguard().eclState().getIOConfig();
+                path = AdjointArchive::defaultPath(ioConfig.getOutputDir(),
+                                                   simulator_.vanguard().caseName());
+            }
+            archive_ = std::make_shared<AdjointArchive>(
+                path, AdjointArchive::Mode::Read,
+                simulator_.vanguard().gridView().comm());
         }
-        archive_ = std::make_unique<AdjointArchive>(
-            path, AdjointArchive::Mode::Read,
-            simulator_.vanguard().gridView().comm());
         archive_->read(meta_, AdjointGroups::meta(), "meta");
 
         if (meta_.schemaVersion != AdjointMeta::currentSchemaVersion) {
@@ -480,7 +492,7 @@ private:
 
     Simulator& simulator_;
     AdjointConfig config_;
-    std::unique_ptr<AdjointArchive> archive_;
+    std::shared_ptr<AdjointArchive> archive_;
     AdjointMeta meta_;
     bool computeBdiagEnabled_{false};
     std::vector<BdiagBlock> bdiag_;

@@ -111,6 +111,38 @@ public:
         return exitCode;
     }
 
+    //! \brief One-stop: forward record + backward sweep in a single process,
+    //!        sharing the states through an in-memory archive (no files).
+    template<class TypeTag>
+    int runOneStop()
+    {
+        int exitCode = EXIT_SUCCESS;
+        if (!initialize_<TypeTag>(exitCode)) {
+            return exitCode;
+        }
+        auto archive = AdjointArchive::makeInMemory();
+        {
+            // Forward run records into the shared in-memory archive.
+            AdjointFlowProblem<TypeTag>::oneStopArchive() = archive;
+            this->setupVanguard();
+            FlowMain<TypeTag> flowMain(argc_, argv_, outputCout_, outputFiles_);
+            exitCode = flowMain.execute();
+            AdjointFlowProblem<TypeTag>::oneStopArchive() = nullptr;
+            if (exitCode != EXIT_SUCCESS) {
+                return exitCode;
+            }
+        }
+        // Backward sweep: fresh production setup (no time loop), reading the
+        // states from the shared archive still held here.
+        FlowMain<TypeTag> flowMain(argc_, argv_, outputCout_, outputFiles_);
+        const int status = flowMain.executeInitStep();
+        if (status != EXIT_SUCCESS) {
+            return status;
+        }
+        AdjointSolver<TypeTag> solver(*flowMain.getSimulatorPtr(), archive);
+        return solver.run();
+    }
+
     template<class TypeTag>
     int runReplay(const std::string& mode)
     {
@@ -194,8 +226,14 @@ int main(int argc, char** argv)
     char** newArgv = args.data();
 
     auto mainObject = std::make_unique<Opm::AdjointMain>(newArgc, newArgv);
-    const int exitCode = mode.empty() ? mainObject->runForward<TypeTag>()
-                                      : mainObject->runReplay<TypeTag>(mode);
+    int exitCode;
+    if (mode.empty()) {
+        exitCode = mainObject->runForward<TypeTag>();
+    } else if (mode == "onestop") {
+        exitCode = mainObject->runOneStop<TypeTag>();
+    } else {
+        exitCode = mainObject->runReplay<TypeTag>(mode);
+    }
     // Destruct mainObject as the destructor calls MPI_Finalize!
     mainObject.reset();
     return exitCode;

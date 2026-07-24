@@ -71,6 +71,16 @@ public:
         registerAdjointParameters();
     }
 
+    //! \brief One-stop archive: when set (by the onestop driver before the
+    //!        forward run), the recorder writes into this shared in-memory
+    //!        archive so the backward sweep in the same process reads it
+    //!        directly — no files. Cleared after the forward run.
+    static std::shared_ptr<AdjointArchive>& oneStopArchive()
+    {
+        static std::shared_ptr<AdjointArchive> archive;
+        return archive;
+    }
+
     void beginEpisode() override
     {
         ParentType::beginEpisode();
@@ -78,10 +88,14 @@ public:
 
         if (!recorderInitialized_) {
             recorderInitialized_ = true;
-            // Only record in forward runs; the replay/adjoint stages reuse
-            // this problem class but must not overwrite the archive.
-            if (Parameters::Get<Parameters::AdjointSave>() &&
-                Parameters::Get<Parameters::AdjointMode>().empty()) {
+            // Record in forward runs; the replay/adjoint stages reuse this
+            // problem class but must not overwrite the archive. In one-stop the
+            // archive presence drives recording (mode is not empty there).
+            if (oneStopArchive()) {
+                recorder_ = std::make_unique<AdjointRecorder<TypeTag>>(
+                    this->simulator(), oneStopArchive());
+            } else if (Parameters::Get<Parameters::AdjointSave>() &&
+                       Parameters::Get<Parameters::AdjointMode>().empty()) {
                 recorder_ = std::make_unique<AdjointRecorder<TypeTag>>(this->simulator());
             }
         }
