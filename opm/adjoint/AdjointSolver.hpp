@@ -52,6 +52,7 @@
 #include <opm/adjoint/AdjointDeckWarnings.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 #include <opm/adjoint/AdjointResidualEvaluator.hpp>
+#include <opm/adjoint/AdjointWellAdjoint.hpp>
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
 
@@ -59,6 +60,7 @@
 #include <opm/material/densead/Math.hpp>
 
 #include <opm/simulators/wells/StandardWell.hpp>
+#include <opm/simulators/wells/MultisegmentWell.hpp>
 
 #include <opm/input/eclipse/Schedule/Well/Connection.hpp>
 
@@ -125,9 +127,30 @@ public:
         objective_.setParallel(&parallel_);
         constexpr std::size_t pressureIndex =
             GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
-        // umfpack is the serial default but single-rank; fall back to the
-        // iterative parallel path (block-ILU0) when running on >1 rank.
         std::string linearSolver = config_.linearSolver;
+        if (linearSolver == "auto") {
+            // Size-based backward-solver selection. umfpack is the exact
+            // small-case oracle, but its LU fill is super-linear (26x forward
+            // RAM on SPE9, OOM at field scale), so switch to the iterative
+            // transposed-CPR solver above a modest cell count — cprt keeps the
+            // adjoint at ~forward memory. Parallel runs cannot use umfpack
+            // (single-rank) and cprt false-converges across ranks, so they use
+            // the proven parallel iterative path (block-ILU0). An explicit
+            // --adjoint-linear-solver bypasses this (config_.linearSolver != "auto").
+            constexpr std::size_t directSolverMaxCells = 2000;
+            const std::size_t nCells = simulator_.model().numGridDof();
+            if (parallel_.parallel()) {
+                linearSolver = "ilu0";
+            } else {
+                linearSolver = (nCells <= directSolverMaxCells) ? "umfpack"
+                                                                : "cprt";
+            }
+            OpmLog::info(fmt::format(
+                "Adjoint backward solver (auto): '{}' selected for {} cells",
+                linearSolver, nCells));
+        }
+        // umfpack is single-rank; fall back to the iterative parallel path
+        // (block-ILU0) if it was requested explicitly on >1 rank.
         if (parallel_.parallel() && linearSolver == "umfpack") {
             linearSolver = "ilu0";
         }
@@ -296,12 +319,19 @@ public:
             "verification failures", objectiveValue, numSubsteps, replayFailures));
         logTermValues_();
         if (linearSolver_.totalIterations() > 0) {
+            const double setup = linearSolver_.setupSeconds();
+            const double apply = linearSolver_.applySeconds();
+            const double solveTot = setup + apply;
             OpmLog::info(fmt::format(
                 "Adjoint linear solver '{}': {} iterations over {} solves "
-                "(avg {:.1f})", linearSolver_.spec(),
+                "(avg {:.1f}); setup {:.3f}s ({:.0f}%) + apply {:.3f}s ({:.0f}%) "
+                "[setup is per-substep preconditioner rebuild — WS3 reuse target]",
+                linearSolver_.spec(),
                 linearSolver_.totalIterations(), linearSolver_.numSolves(),
                 double(linearSolver_.totalIterations()) /
-                    std::max(1, linearSolver_.numSolves())));
+                    std::max(1, linearSolver_.numSolves()),
+                setup, solveTot > 0 ? 100.0 * setup / solveTot : 0.0,
+                apply, solveTot > 0 ? 100.0 * apply / solveTot : 0.0));
         }
         reportTiming_(numSubsteps);
 
@@ -425,8 +455,15 @@ private:
             const auto* stdWell =
                 dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
             if (!stdWell) {
+                const auto* mswWell =
+                    dynamic_cast<const MultisegmentWell<TypeTag>*>(wellPtr.get());
+                if (mswWell) {
+                    mswAddWellObjectiveRhs_(*mswWell, dt, rhs);
+                    continue;
+                }
                 OPM_THROW(std::runtime_error,
-                          "Adjoint well objectives support StandardWells only");
+                          "Adjoint well objectives support StandardWell and "
+                          "MultisegmentWell only");
             }
             const auto& eqns = stdWell->linSys();
             const auto& Dmat = eqns.Dmatrix()[0][0];
@@ -474,6 +511,11 @@ private:
             const auto* stdWell =
                 dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
             if (!stdWell) {
+                const auto* mswWell =
+                    dynamic_cast<const MultisegmentWell<TypeTag>*>(wellPtr.get());
+                if (mswWell) {
+                    mswComputeWellAdjoints_(k, dt, lambda, *mswWell);
+                }
                 continue;
             }
             const auto& eqns = stdWell->linSys();
@@ -532,6 +574,156 @@ private:
                 : WellInjectorCMode2String(ws.injection_cmode);
             controlGradientByMode_[stdWell->name()][mode] += contribution;
         }
+    }
+
+    // ====================================================================
+    //  MultisegmentWell well-adjoint (task #16)
+    //
+    //  A StandardWell has a single well row; a MultisegmentWell (MSW) has
+    //  numSeg segment rows, so the well unknown is length numSeg*numWellEq and
+    //  D is block-sparse over segments (numSeg x numSeg, with off-diagonal
+    //  inlet/outlet blocks). The objective still touches only the TOP segment
+    //  (segment 0): getBhp() = getSegmentPressure(0) and getQs() =
+    //  getSegmentRate(0,.), so dJ/dx_w is nonzero only in the segment-0 block
+    //  [0,numWellEq), and the active control equation is the segment-0 pressure
+    //  row (SPres = numWellEq-1) — the first block — so the standard
+    //  -lambda_w[numWellEq-1] control convention carries over unchanged.
+    //
+    //  The reservoir-side lambda_r is already MSW-correct (the Schur step
+    //  addWellContributions folds any well type into the reduced reservoir
+    //  matrix); only these well-side terms were StandardWell-only. This is the
+    //  fix-free route for the frozen-hydrostatic-head bias (task #24): MSW
+    //  solves segment pressures implicitly, so the head is differentiable.
+    //
+    //  v1 note: MSW endpoint-scaling and dCTF/dperm well-coupling gradients are
+    //  not yet wired (those loops still skip MSW); well-objective (bhp/rate)
+    //  and well-control gradients are covered here. Serial (the adjoint's v1
+    //  scope): B/C columns are local perforation indices == global in serial.
+    // ====================================================================
+
+    //! \brief dJ_k/dx_w for one MultisegmentWell — length numSeg*numWellEq,
+    //!        nonzero only in the segment-0 block. Mirrors
+    //!        wellObjectiveGradient_ but embeds the segment-0 terms in the
+    //!        longer segment-system vector.
+    Dune::DynamicVector<Scalar>
+    mswWellObjectiveGradient_(const MultisegmentWell<TypeTag>& msw, double dt)
+    {
+        using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
+        const auto& Dmat = msw.linSys().Dmatrix();
+        const std::size_t numSeg = Dmat.N();
+        const std::size_t numWellEq = Dmat[0][0].N();
+        Dune::DynamicVector<Scalar> dJdxw(numSeg * numWellEq, 0.0);
+
+        if (objective_.kind() == Kind::WellBhp) {
+            // BHP is the top-segment pressure (SPres = numWellEq-1, segment 0);
+            // getSegmentPressure(0) is unscaled, so dJ/d(SPres var) = dJ/dbhp.
+            dJdxw[numWellEq - 1] =
+                objective_.bhpGradient(msw.name(), dt, simulator_.time() + dt);
+        } else if (objective_.kind() == Kind::RateTerms) {
+            for (const auto& term : objective_.rateTerms()) {
+                if (term.well != msw.name()) {
+                    continue;
+                }
+                // getQs is evaluated at segment 0; its well derivatives sit in
+                // slots [numEq, numEq+numWellEq) -> the segment-0 block.
+                const auto qs = msw.primaryVariables().getQs(
+                    FluidSystem::canonicalToActiveCompIdx(term.canonicalCompIdx));
+                const Scalar weight =
+                    objective_.termWeight(simulator_, term, dt, qs.value());
+                for (std::size_t j = 0; j < numWellEq; ++j) {
+                    dJdxw[j] += weight * qs.derivative(numEq + j);
+                }
+            }
+        }
+        return dJdxw;
+    }
+
+    //! \brief Add the MSW well-objective coupling B^T D^-T (dJ_k/dx_w) to the
+    //!        adjoint right-hand side (segment-system generalisation of
+    //!        addWellObjectiveRhs_).
+    void mswAddWellObjectiveRhs_(const MultisegmentWell<TypeTag>& msw,
+                                 double dt, Vector& rhs)
+    {
+        const auto& eqns = msw.linSys();
+        const auto& Dmat = eqns.Dmatrix();
+        const std::size_t numWellEq = Dmat[0][0].N();
+
+        const auto dJdxw = mswWellObjectiveGradient_(msw, dt);
+        const auto y = AdjointWellAdjoint::solveTransposedWellSystem(
+            Dmat, dJdxw, static_cast<int>(numWellEq));
+
+        // rhs_cell += B[seg][perf]^T y[seg] over all segments / perforations.
+        const auto& Bmat = eqns.Bmatrix();
+        const auto& cells = msw.cells();
+        for (auto row = Bmat.begin(); row != Bmat.end(); ++row) {
+            const std::size_t seg = row.index();
+            for (auto colIt = row->begin(); colIt != row->end(); ++colIt) {
+                const std::size_t perfIdx = colIt.index();
+                const int cellIdx = cells[perfIdx];
+                const auto& block = *colIt; // numWellEq x numEq
+                for (int eq = 0; eq < numEq; ++eq) {
+                    Scalar sum = 0.0;
+                    for (std::size_t we = 0; we < numWellEq; ++we) {
+                        sum += block[we][eq] * y[seg * numWellEq + we];
+                    }
+                    rhs[cellIdx][eq] += sum;
+                }
+            }
+        }
+    }
+
+    //! \brief MSW well adjoints of substep k:
+    //!        lambda_w = -D^-T (dJ_k/dx_w + sum_perf C[seg][perf] lambda_r[cell]),
+    //!        plus the control-target gradient (segment-system generalisation of
+    //!        computeWellAdjoints_).
+    void mswComputeWellAdjoints_(int k, double dt, const Vector& lambda,
+                                 const MultisegmentWell<TypeTag>& msw)
+    {
+        const auto& eqns = msw.linSys();
+        const auto& Dmat = eqns.Dmatrix();
+        const std::size_t numWellEq = Dmat[0][0].N();
+
+        auto work = mswWellObjectiveGradient_(msw, dt); // numSeg*numWellEq
+
+        const auto& Cmat = eqns.Cmatrix();
+        const auto& cells = msw.cells();
+        for (auto row = Cmat.begin(); row != Cmat.end(); ++row) {
+            const std::size_t seg = row.index();
+            for (auto colIt = row->begin(); colIt != row->end(); ++colIt) {
+                const std::size_t perfIdx = colIt.index();
+                const int cellIdx = cells[perfIdx];
+                const auto& block = *colIt; // numWellEq x numEq
+                for (std::size_t we = 0; we < numWellEq; ++we) {
+                    for (int eq = 0; eq < numEq; ++eq) {
+                        work[seg * numWellEq + we] +=
+                            block[we][eq] * lambda[cellIdx][eq];
+                    }
+                }
+            }
+        }
+
+        auto lambdaW = AdjointWellAdjoint::solveTransposedWellSystem(
+            Dmat, work, static_cast<int>(numWellEq));
+        lambdaW *= -1.0;
+        lambdaWells_[msw.name()] = lambdaW;
+
+        std::string line = std::to_string(k) + " " + msw.name();
+        for (std::size_t j = 0; j < lambdaW.size(); ++j) {
+            line += " " + std::to_string(lambdaW[j]);
+        }
+        wellAdjointLog_.push_back(std::move(line));
+
+        // Control equation = top-segment (0) pressure row (SPres = numWellEq-1),
+        // the first block of the flattened well vector.
+        const Scalar contribution = -lambdaW[numWellEq - 1];
+        controlGradient_[msw.name()] += contribution;
+
+        const auto& ws =
+            simulator_.problem().wellModel().wellState().well(msw.name());
+        const std::string mode = msw.isProducer()
+            ? WellProducerCMode2String(ws.production_cmode)
+            : WellInjectorCMode2String(ws.injection_cmode);
+        controlGradientByMode_[msw.name()][mode] += contribution;
     }
 
     //! \brief Analytic parameter gradients (hand-derived closed forms).

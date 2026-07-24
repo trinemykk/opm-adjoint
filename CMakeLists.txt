@@ -204,6 +204,18 @@ if(HAVE_OPM_TESTS)
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
               ${_testout}/dirderiv_general_spe9 pv pressure-average 1e-6 5e-3 1 1)
+    # WS1 gate: the iterative cprt backward solver (the "auto"/field default
+    # above 2000 cells) must reproduce the umfpack (direct oracle) gradients at
+    # field scale — the memory enabler is only usable if it is accurate here.
+    # SPE9 = 9000 cells, DISGAS, multi-perforation wells. Labelled "field" (it
+    # runs a forward + two backward sweeps ~ tens of s).
+    add_test(NAME adjoint_solver_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-solver-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
+              ${_testout}/solver_spe9 1e-7 cprt)
+    set_tests_properties(adjoint_solver_spe9 PROPERTIES
+      LABELS field TIMEOUT 600 ENVIRONMENT "METRIC=field")
     # A6: PORO history-match demo end to end — one-stop + JSON config + matchref
     # wildcard objective + cartesian CSV output, FD-verified per-cell on the
     # dominant-sensitivity cells. Heavier (~90s: truth + one-stop + FD forwards);
@@ -269,14 +281,19 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-onestop-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/onestop_spe1)
-    # Multisegment-well smoke test: MSW records + reservoir gradients work;
-    # MSW well-objective gradients are cleanly rejected (StandardWell-only,
-    # until task #16 / the --use-multisegment-well=always converter).
+    # Multisegment-well tests: MSW records + reservoir gradients work, and the
+    # MSW well-adjoint (task #16) makes well objectives (bhp/rate) run and
+    # FD-verify. The smoke test guards the plumbing; the fd test guards accuracy
+    # (bhp:PROD, the pure well-objective, FD-matches the segment-system adjoint).
     if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA)
       add_test(NAME adjoint_msw_smoke_spe1
         COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-msw-test.sh
                 $<TARGET_FILE:flow_adjoint>
                 ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA ${_testout}/msw_spe1)
+      add_test(NAME adjoint_fd_msw_wellobj_spe1
+        COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-msw-wellobj-test.sh
+                $<TARGET_FILE:flow_adjoint>
+                ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA ${_testout}/fd_msw_wellobj_spe1)
     endif()
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh

@@ -1,15 +1,15 @@
 #!/bin/bash
 # Simple multisegment-well (MSW) smoke test for the adjoint. Establishes the
-# current, supported behaviour (and guards it):
+# supported behaviour (and guards it):
 #   1. an MSW deck records a forward run (per-substep snapshots) fine;
 #   2. a RESERVOIR objective (pressure-average) yields gradients with MSW wells
 #      present -- the reservoir-parameter path does not need the well-equation
 #      derivative;
-#   3. a WELL objective (bhp) is currently rejected: MSW well-objective
-#      gradients are unsupported (StandardWell-only). This is the limitation the
-#      --use-multisegment-well=always conversion + MSW well-adjoint (task #16)
-#      will lift; until then the run must fail with a clear message (not a
-#      silent wrong answer).
+#   3. a WELL objective (bhp) now runs (task #16, MSW well-adjoint): the
+#      segment-system D^-T solve + B/C accumulation produce well-control
+#      gradients. FD accuracy is checked separately by
+#      run-adjoint-fd-msw-wellobj-test.sh; here we only assert it no longer
+#      throws and emits the well-control-by-mode gradients.
 #
 # usage: run-adjoint-msw-test.sh <flow_adjoint> <SPE1CASE2_MSW.DATA> <outdir>
 set -u
@@ -34,14 +34,17 @@ if [ $? -eq 0 ] && [ -s "$OUT"/*.ADJOINT_GRADIENTS_PV.txt ]; then
     echo "MSW + reservoir objective: PV gradients produced (PASS)"
 else echo "FAIL: MSW + pressure-average did not produce reservoir gradients"; status=1; fi
 
-# 3. well objective currently rejected with a clear message
+# 3. well objective now supported (task #16): runs and emits well-control
+#    gradients (no longer the "StandardWells only" throw).
 $FLOW "$DECK" --output-dir="$OUT" $S --adjoint-mode=gradient --adjoint-file="$OUT/a" \
     --adjoint-objective=bhp:PROD > "$OUT/grad_bhp.log" 2>&1
 rc=$?
-if [ $rc -ne 0 ] && grep -q "StandardWells only" "$OUT/grad_bhp.log"; then
-    echo "MSW + well objective: rejected with 'StandardWells only' (PASS, expected until #16)"
+bymode=$(ls "$OUT"/*.ADJOINT_GRADIENTS_WELLCTRL_BYMODE.txt 2>/dev/null | head -1)
+if [ $rc -eq 0 ] && ! grep -q "StandardWells only" "$OUT/grad_bhp.log" \
+   && [ -n "$bymode" ] && grep -q "PROD BHP" "$bymode"; then
+    echo "MSW + well objective (bhp): produced well-control gradients (PASS, #16)"
 else
-    echo "FAIL: MSW + bhp objective did not cleanly reject (rc=$rc)"; status=1
+    echo "FAIL: MSW + bhp objective did not produce well gradients (rc=$rc)"; status=1
 fi
 
 [ $status -eq 0 ] && echo "adjoint MSW smoke test: PASS" || echo "adjoint MSW smoke test: FAIL"
