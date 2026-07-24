@@ -38,6 +38,23 @@ decks up to field models, and is guarded by a green ctest suite (**15/15**).
 | **Tests** | ctest **15/15**; FD-verified golden-reference regression set in `tests/references/`; per-eps FD accuracy study in [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md). |
 | **JutulDarcy cross-check** | Set up (`jutul/`); pattern/sign-level agreement (forwards differ by well model). FD remains the authoritative oracle. |
 
+### Slim archive (`--adjoint-slim=true`)
+
+The per-substep snapshot serialized the full Eclipse Schedule (via the
+vanguard) every substep — static and reconstructed from the deck at replay, so
+pure redundancy (124 KB/substep on SPE1; far more on field decks). Slim mode
+stores only the **dynamic** state (model solution, problem, summary/UDQ/action);
+replay reconstructs the schedule from the deck and sets time/episode from meta
+(it already did both). **Byte-identical to the full snapshot** — verified as a
+hard gate (`adjoint_slim_grpctrl`, on the group-control/guide-rate deck), all
+gradient families bit-for-bit, SPE1 archive 27M→11M (2.5×; larger on field
+decks). The full snapshot stays the **default proven path**; slim is opt-in
+(JSON `archive.slim`). **Not** for runtime schedule-modifying decks
+(ACTIONX/UDQ-driven) — a startup warning fires; use the full archive there.
+General-AD is verified exact for PORO/PERM at field scale (SPE9 oracle: PV
+6e-16, PERM 1e-15), so `--adjoint-gradient-method=general-ad` is the
+recommended fast generic path (analytic remains the default oracle).
+
 ### Configuration file (`--adjoint-config=<file>.json`)
 
 A JSON config file (2026-07-23) replaces the grown `--adjoint-*` flag strings and

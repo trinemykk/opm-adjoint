@@ -76,6 +76,13 @@ public:
         checkConfiguration_();
         OpmLog::info("Adjoint recording enabled; archive: " + path +
                      (archive_->usesHdf5() ? " (HDF5)" : " (directory store)"));
+        if (config_.slim) {
+            OpmLog::info("Adjoint slim archive: per-substep snapshots omit the "
+                         "static schedule (reconstructed from the deck at "
+                         "replay). Do NOT use on decks that modify the schedule "
+                         "at runtime (ACTIONX/UDQ-driven WELOPEN, WELTARG, ...) "
+                         "— use the full archive there.");
+        }
     }
 
     //! \brief Snapshot the initial state; call after the well model has
