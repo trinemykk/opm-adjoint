@@ -106,10 +106,12 @@ struct AdjointReplayAbsTolerance { static constexpr double value = 1e-9; };
 struct AdjointResidualEvalCheck { static constexpr bool value = false; };
 
 //! \brief How PV/trans/perm parameter gradients are accumulated:
-//!        "analytic" (hand-derived closed forms, default) or "general"
-//!        (stencil-local re-evaluation via AdjointResidualEvaluator;
-//!        all parameters in one backward sweep).
-struct AdjointGradientMethod { static constexpr auto value = "analytic"; };
+//!        "general-ad" (seeded-AD stencil-local evaluation, the generic
+//!        default — exact to machine precision, verified on SPE9), "general"
+//!        (the same stencil-local mechanism by finite difference), or
+//!        "analytic" (hand-derived closed forms; fastest, kept as the
+//!        verification oracle).
+struct AdjointGradientMethod { static constexpr auto value = "general-ad"; };
 
 //! \brief Central-difference step for the finite-difference gradient
 //!        paths (the 'general' method's multiplier perturbations and the
@@ -147,7 +149,7 @@ struct AdjointConfig
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};
     bool residualEvalCheck{false}; //!< verify the standalone residual evaluator
-    std::string gradientMethod{"analytic"}; //!< "analytic" or "general"
+    std::string gradientMethod{"general-ad"}; //!< general-ad|general|analytic
     double fdStep{1e-7};      //!< central-difference step for FD gradients
     std::string endpointMethod{"whole"}; //!< endpoint FD: "whole" or "stencil"
     bool permWellTerm{true};  //!< dCTF/dperm well-coupling term at perforations
