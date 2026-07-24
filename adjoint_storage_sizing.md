@@ -1,25 +1,128 @@
-# Adjoint storage sizing and the case for disk
+# Adjoint memory, storage and performance
 
 **Status:** measured note, 2026-07-24. Numbers from `flow_adjoint` on this machine
-(directory store, `--enable-storage-cache=false`, non-adaptive). Supersedes the
-optimistic "slim fits in RAM" framing in earlier notes for the field-scale case.
+(Apple M4 Pro, serial, `--enable-storage-cache=false`). Covers three separate
+questions that were being conflated: **peak RAM** (can adjoint run the same model
+sizes as forward?), **tape storage** (RAM vs disk), and **wall-clock overhead**.
 
-## TL;DR
+## TL;DR — the binding constraint is the backward *solver*, not the tape
 
-- A forward run stores a **tape**: one state snapshot per *accepted substep*, needed
-  by the backward sweep. Its size is `bytes_per_cell × n_cells × n_substeps`.
-- Measured **slim** cost is **~230 bytes/cell/substep** for black-oil (3 eq). Full
-  (proven) snapshots add the static schedule on top — dominant on small decks,
-  minor at field scale.
-- **Slim only helps small / schedule-heavy decks.** At 9 000 cells it already saves
-  just 11%, because the per-cell dynamic state — not the schedule — dominates.
-- **For real fields, an all-in-RAM tape is not viable**, matching the intuition that
-  drove this note. A 1 M-cell history match wants **100–450 GB** of tape. That must
-  live on disk (streamed), or be avoided by checkpoint-recompute. The in-RAM one-stop
-  archive is a **development / small-case** convenience, not the field path.
-- Norne (~44 k active cells) is a *small* field. Target field sizes are **0.1–1 M
-  cells with tens to hundreds of wells** and 20–30 years of monthly-plus reporting,
-  i.e. **hundreds to a few thousand substeps**. The tape grows with the product.
+- **The first thing that limits adjoint model size is the backward linear solver's
+  memory, not storage.** On SPE9 (9 000 cells) the backward sweep peaks at **4.1 GB
+  with umfpack** (direct LU of the transposed, well-coupled Jacobian) vs **156 MB for
+  the forward run** — a **26×** blowup. The recorded tape is only 43 MB and is
+  streamed one substep at a time, so it is *not* the driver.
+- **Switch the backward solve to an iterative solver and the blowup disappears**:
+  cprt **356 MB**, ilu0 **347 MB** — about **2.3× the forward**, not 26×. umfpack's
+  fill-in scales super-linearly, so at field scale it is fatal (Norne ≈ tens of GB,
+  1 M-cell impossible); cprt/ilu0/hypre-coarse scale ~linearly like the forward solve.
+  **=> With an iterative backward solver, adjoint runs at essentially forward-model
+  size.** This is the enabler for the 0.1–1 M-cell target.
+- **Recording is nearly free** in both RAM and time: it adds ~0 MB peak RSS (the
+  snapshot is serialized and handed to the archive, not held) and, on these cases,
+  <1 ms/snapshot. "IO is not free" — true — but at these sizes it is a rounding error
+  next to the sweep; the note quantifies it rather than assuming it away.
+- **Backward wall-clock is dominated by gradient accumulation, not the solve**: 74 %
+  of the SPE9 sweep is general-AD gradient accumulation, 24 % the transposed solve.
+  So the *memory* lever (solver) and the *speed* lever (gradient accumulation) are
+  different knobs.
+- **Tape storage is a real but second-order constraint** (details below): the
+  two-process/disk path streams it at ~forward memory; only the in-RAM one-stop must
+  hold the whole tape, so one-stop is a dev/small-case convenience and the field path
+  is record-to-disk (what the A5 spill formalises). Norne (~44 k cells) is a *small*
+  field; targets are **0.1–1 M cells, tens–hundreds of wells, hundreds–thousands of
+  substeps**.
+
+## Peak memory (measured, `/usr/bin/time -l` max RSS)
+
+SPE9, 9 000 active cells, 21 substeps:
+
+| run | wall | max RSS | ×forward |
+|---|---:|---:|---:|
+| forward only | 2.7 s | **156 MiB** | 1.0 |
+| forward + record (full **or** slim) | 2.6 s | ~155 MiB | ~1.0 |
+| backward, **umfpack** (2-proc, tape from disk) | 32 s | **4103 MiB** | **26×** |
+| backward, **cprt** | 27 s | **356 MiB** | 2.3× |
+| backward, **ilu0** | 28 s | 347 MiB | 2.2× |
+| one-stop (fwd+tape+bwd in RAM), umfpack | 34 s | 5491 MiB | 35× |
+
+Norne, **44 431 active cells**, 147 substeps — real field case, **measured** (not
+extrapolated), pressure-average objective, cprt backward:
+
+| run | wall | max RSS | ×forward |
+|---|---:|---:|---:|
+| forward only | 57 s | **699 MiB** | 1.0 |
+| forward + record (full, 4.5 GB tape) | 102 s | 756 MiB | 1.08 |
+| **backward, cprt** | 63 s | **778 MiB** | **1.11** |
+| backward, umfpack (extrapolated, ~O(n¹·⁵) fill) | — | ~40 GB → **OOM** | ~57× |
+
+Reading: **the full Norne adjoint runs at 1.1× the forward memory with cprt** — you do
+*not* need a smaller model. umfpack at this size would need tens of GB (likely OOM).
+**Recording costs ~0 extra RAM** (756 vs 699 MiB) but ~45 s of extra *time* here
+(writing the 4.5 GB full tape — "IO is not free" at field scale; slim ≈ 1.5 GB would
+roughly a third that). Use umfpack only as the small-case verification oracle; default
+field runs to an iterative backward solver (`--adjoint-linear-solver=cprt`, or the
+hypre-coarse CPR config `tests/adjoint-cprt-hypre.json` once hypre is compiled in).
+(NB: Norne gradients here carry the documented ~90 %-bitwise replay drift at
+well-event/hysteresis boundaries — a v1 approximation; this run measures cost, not
+gradient accuracy, which is the Norne-shakeout task.)
+
+## Performance: where the wall-clock goes
+
+The backward sweep is already instrumented; the breakdown (and the new recording
+timing) print to the `.PRT`/`.DBG` at the end of the run. SPE9, umfpack backward,
+31.8 s total:
+
+```
+replay (re-linearize)    0.47 s   1.5%
+schur  (well contrib.)   0.00 s   0.0%
+solve  (transposed)      7.69 s  24.2%    <- solver: also the memory driver
+gradients (pv/trans/w)  23.62 s  74.3%    <- general-AD accumulation: the time driver
+endpoints (FD)           0.00 s   0.0%
+```
+
+The split is **objective-dependent**. Norne (147 substeps, cprt, *pressure-average*
+objective — only the final substep contributes to the rhs) inverts it:
+
+```
+replay (re-linearize)   18.68 s  30.4%
+solve  (transposed)     32.75 s  53.3%    <- solve dominates here
+gradients (pv/trans/w)   9.96 s  16.2%    <- cheap: rhs is zero except last substep
+```
+
+A per-substep objective (matchref) makes gradient accumulation dominate; a
+final-substep objective (pressure-average) makes the solve dominate. Both knobs matter.
+
+- **Overhead factor:** one adjoint gradient (record + backward) ≈ **3× a forward run**
+  on Norne (102 s record + 63 s sweep vs 57 s forward) and ≈ **10–12×** on SPE9 (the
+  per-substep matchref objective loads the gradient phase). The sweep + record, not any
+  single piece, is the cost.
+- **Memory knob = solver** (§ above). **Speed knob = gradient accumulation** (74 %):
+  the general-AD path re-seeds and re-evaluates per cell each substep. Analytic
+  accumulation is cheaper but per-family; a future speed win is reusing the AD
+  seeding/IQ across families, or the analytic path where it exists.
+- **cprt hierarchy reuse** would cut the solve further: the sweep does N transposed
+  solves on matrices with the *same sparsity*, so the AMG hierarchy (cprt/hypre setup)
+  can be built once and reused — currently rebuilt each substep.
+- **Recording/IO** (new `Adjoint recording timing` line): SPE1 121 snapshots in
+  0.073 s (0.6 ms each). Small, but it is now measured per run, so a field deck where
+  IO *does* bite will show it.
+
+## hypre for the coarse (pressure) solve
+
+`tests/adjoint-cprt-hypre.json` configures the backward solver as transposed CPR
+(`cprt`) with **hypre BoomerAMG as the coarse/pressure solve** — the accurate,
+memory-light replacement for umfpack at field scale. **Not yet runnable in this
+build:** `USE_HYPRE=ON` is in the CMake cache but `HAVE_HYPRE` was never written into
+`config.h`, so the `hypre` preconditioner is not registered (runtime abort:
+`available = amg cpr cprt dilu …`). Enabling it means rebuilding `opm-simulators`
+with hypre actually detected; hypre only pays off at ≥10⁵ cells, so it belongs with
+the Norne/field bring-up. The `amg` coarse solver (registered) is the drop-in
+stand-in meanwhile (`coarsesolver.preconditioner.type: amg`).
+
+---
+
+## Tape storage (RAM vs disk) — the second-order constraint
 
 ## What one snapshot contains
 

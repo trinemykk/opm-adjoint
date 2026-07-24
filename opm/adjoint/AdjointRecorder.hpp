@@ -31,6 +31,8 @@
 
 #include <opm/common/OpmLog/OpmLog.hpp>
 
+#include <fmt/format.h>
+
 #include <opm/models/discretization/common/fvbaseparameters.hh>
 #include <opm/models/utils/parametersystem.hpp>
 #include <opm/models/utils/propertysystem.hh>
@@ -42,6 +44,7 @@
 #include <opm/adjoint/AdjointSystemIO.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 
+#include <chrono>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -108,7 +111,9 @@ public:
         // Sync the internal WGState copies so the snapshot can later be
         // read against a prepareDeserialize()'d well model in replay.
         normalizeWGStateForSerialization(simulator_.problem().wellModel());
+        const auto t0 = Clock::now();
         writeSnapshot_(AdjointGroups::initial());
+        recordSeconds_ += secs_(t0);
     }
 
     //! \brief Write one snapshot. Full = the whole simulator (proven). Slim =
@@ -144,6 +149,7 @@ public:
         const int k = static_cast<int>(meta_.substeps.size());
         const std::string group = AdjointGroups::substep(k);
 
+        const auto t0 = Clock::now();
         writeSnapshot_(group);
         if (!config_.slim) {
             // Retained for the full (proven) format; the well/group state is
@@ -155,6 +161,7 @@ public:
         if (config_.saveSystem) {
             recordSystem_(group);
         }
+        recordSeconds_ += secs_(t0);
 
         AdjointSubstepMeta meta;
         meta.globalIdx = k;
@@ -175,6 +182,18 @@ public:
         Parameters::printValues(params);
         archive_->writeText(AdjointGroups::meta(), "parameters", params.str());
 
+        // Recording-phase timing (serialize + archive write, fused). This is
+        // the forward-side adjoint overhead; it lands in the .DBG/.PRT next to
+        // the backward "Adjoint sweep timing" block so the whole adjoint cost
+        // is visible at the end of the run. IO is not free — this quantifies it.
+        const int n = static_cast<int>(meta_.substeps.size());
+        const char* medium = archive_->inMemory() ? "in-memory"
+                           : (archive_->usesHdf5() ? "HDF5" : "directory store");
+        OpmLog::info(fmt::format(
+            "Adjoint recording timing: {} snapshots in {:.3f} s "
+            "({:.1f} ms/snapshot, {} archive)",
+            n + 1, recordSeconds_,
+            1000.0 * recordSeconds_ / std::max(1, n + 1), medium));
         OpmLog::info("Adjoint recording finished: " +
                      std::to_string(meta_.substeps.size()) + " substeps stored");
     }
@@ -221,10 +240,17 @@ private:
         archive_->write(jacobian, group + "/system", "jacobian");
     }
 
+    using Clock = std::chrono::steady_clock;
+    static double secs_(Clock::time_point t0)
+    {
+        return std::chrono::duration<double>(Clock::now() - t0).count();
+    }
+
     Simulator& simulator_;
     AdjointConfig config_;
     std::shared_ptr<AdjointArchive> archive_;
     AdjointMeta meta_;
+    double recordSeconds_ = 0.0;   //!< wall time spent serializing + writing
 };
 
 } // namespace Opm

@@ -101,6 +101,36 @@ CLI overrides JSON). The JSON `mode` is now honoured by the run-mode dispatch
 `--adjoint-mode` is on the command line), so a config file is **self-contained**
 — ERT/Everest can hand over only the JSON and still select `onestop`.
 
+### Memory & performance (measured — see `adjoint_storage_sizing.md`)
+
+The constraint that decides adjoint model size is the **backward linear solver's
+memory, not storage**. Measured max RSS:
+
+| | forward | backward umfpack | backward cprt |
+|---|---:|---:|---:|
+| SPE9 (9 k cells) | 156 MiB | **4103 MiB (26×)** | **356 MiB (2.3×)** |
+| **Norne (44 k cells)** | 699 MiB | ~40 GB → **OOM** (extrap.) | **778 MiB (1.1×)** |
+
+umfpack's LU fill scales super-linearly → fatal at field scale; **cprt/ilu0 keep the
+adjoint at ~forward memory**, so with an iterative backward solver the adjoint runs the
+**same model sizes as the forward** (the full 44 k-cell Norne adjoint peaks at 1.1×
+forward). Recording adds ~0 RAM; at Norne scale it adds ~45 s of *time* (writing a
+4.5 GB full tape — slim ≈ ⅓). Backward wall-clock split is objective-dependent
+(SPE9/matchref: gradient accumulation 74 %; Norne/pressure-average: transposed solve
+53 %). New timing output: the recorder now logs `Adjoint recording timing` and the
+sweep logs `Adjoint sweep timing` — both land at the end of the `.DBG`/`.PRT`.
+Recommendation: umfpack only as the small-case oracle; field runs default to
+`--adjoint-linear-solver=cprt` (or the hypre-coarse CPR config
+`tests/adjoint-cprt-hypre.json` once opm-simulators is built with `HAVE_HYPRE`).
+
+**First real gradient-accuracy case: not Norne.** Norne replay drifts to ~1.0 residual
+at hysteresis/well-event boundaries (documented v1 approximation) — fine for the cost
+measurements above but it **corrupts gradients**. The plan is to validate real-field
+gradients first on a simpler case — **OLYMPUS** (to be copied in) — or a
+hysteresis-disabled Norne, before the full Norne shakeout. A fast repeatable
+`NORNE_ATW2013_ADJSHORT.DATA` (schedule truncated to ~3 steps, full 44 k cells, ~2 s
+forward) exists for cost/plumbing iteration.
+
 ### Field-scale PORO history-match demo (A6, `adjoint_poro_field_demo_spe9`)
 
 End-to-end exercise of the **practical field configuration** on SPE9 (9000

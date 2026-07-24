@@ -1,0 +1,22 @@
+{
+  "_comment": "Adjoint backward linear solver: transposed CPR (cprt) with hypre BoomerAMG as the pressure/coarse solve. Use via --adjoint-linear-solver=<this file>. cprt applies the CPR two-stage preconditioner to the TRANSPOSED reservoir system (the adjoint canonical form); the coarse (pressure) level is solved by hypre AMG, which scales to field size where umfpack's direct factors blow up in memory (SPE9: umfpack backward 4 GB vs iterative ~0.35 GB). REQUIRES an opm-simulators built with HAVE_HYPRE (this tree has USE_HYPRE=ON in the cache but HAVE_HYPRE was not compiled into config.h, so the hypre preconditioner is not registered yet -- rebuild opm-simulators with hypre to use this). Falls back to the amg coarse solver by changing coarsesolver.preconditioner.type to amg.",
+  "tol": "1e-2",
+  "maxiter": "50",
+  "solver": "bicgstab",
+  "verbosity": "0",
+  "preconditioner": {
+    "type": "cprt",
+    "finesmoother": { "type": "ilu0", "relaxation": "1.0" },
+    "coarsesolver": {
+      "tol": "1e-1",
+      "maxiter": "1",
+      "solver": "loopsolver",
+      "verbosity": "0",
+      "preconditioner": {
+        "type": "hypre",
+        "verbosity": "0"
+      }
+    },
+    "verbosity": "0"
+  }
+}
