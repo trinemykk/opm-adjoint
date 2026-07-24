@@ -123,13 +123,34 @@ Recommendation: umfpack only as the small-case oracle; field runs default to
 `--adjoint-linear-solver=cprt` (or the hypre-coarse CPR config
 `tests/adjoint-cprt-hypre.json` once opm-simulators is built with `HAVE_HYPRE`).
 
-**First real gradient-accuracy case: not Norne.** Norne replay drifts to ~1.0 residual
-at hysteresis/well-event boundaries (documented v1 approximation) — fine for the cost
-measurements above but it **corrupts gradients**. The plan is to validate real-field
-gradients first on a simpler case — **OLYMPUS** (to be copied in) — or a
-hysteresis-disabled Norne, before the full Norne shakeout. A fast repeatable
-`NORNE_ATW2013_ADJSHORT.DATA` (schedule truncated to ~3 steps, full 44 k cells, ~2 s
-forward) exists for cost/plumbing iteration.
+**Two correctness rules to keep straight** (2026-07-24):
+
+1. **Replay must be *exact* (bitwise).** A non-zero replay residual is not an
+   approximation to tolerate — it means the recorded storage is incomplete or the
+   re-initialization at replay is wrong (some history state is not stored/reconstructed
+   bit-for-bit). It is a bug to fix, not a tuning knob.
+2. **The adjoint is not correct without the explicit-update cross-step equations.**
+   Explicitly-updated quantities (DRSDT/DRVDT, hysteresis, guide rates, …) make step-k's
+   residual depend on step-(k−1) state; the backward `Bdiag` currently omits that
+   derivative (task #18). So even with exact replay, gradients on decks where those
+   quantities bind are wrong until #18 lands.
+
+**Consequence — the first real gradient-accuracy case must avoid both problems.** Full
+Norne replay drifts to ~1.0 residual at hysteresis/well-event boundaries (missing
+stored/reinit'd state) *and* binds explicit-update quantities. A cleaned Norne removes
+both sources. Two decks now exist (`opm-tests/norne`, uncommitted):
+
+- `NORNE_ATW2013_ADJSHORT.DATA` — the stock SHORT deck with its 1-step `END` removed,
+  ~24–35 substeps, full 44 k cells (~a few s forward).
+- `NORNE_ATW2013_ADJSHORT_CLEAN.DATA` — same with **tracers and hysteresis commented
+  out** (`-- [adjoint-clean]` markers). Measured over 35 timesteps: field pressure
+  changes **0.003 %**, well rates **< 0.25 %** (tracers passive; hysteresis barely
+  activates) — *behaviourally the same field* — while the replay residual drops **4.5×**
+  (7e-3 → 1.5e-3), because the un-stored hysteresis state is no longer in play. The
+  remaining 1.5e-3 is well-event/group-control state that is *still* not stored/reinit
+  exactly — a real bug to chase toward bitwise replay, not an accepted floor. OLYMPUS is
+  a still-simpler fallback. Forward wells run on **RESV with constraints**; the accuracy
+  objective is **well rates (± BHP)** — the A6 matchref machinery already covers it.
 
 ### Field-scale PORO history-match demo (A6, `adjoint_poro_field_demo_spe9`)
 

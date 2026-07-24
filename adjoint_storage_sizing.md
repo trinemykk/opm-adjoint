@@ -93,10 +93,39 @@ gradients (pv/trans/w)   9.96 s  16.2%    <- cheap: rhs is zero except last subs
 A per-substep objective (matchref) makes gradient accumulation dominate; a
 final-substep objective (pressure-average) makes the solve dominate. Both knobs matter.
 
+### The forward run itself, for comparison
+
+The simulator prints its own phase breakdown at the end of every run; putting it next
+to the adjoint sweep makes the components comparable (the adjoint sweep is essentially
+*one Jacobian re-linearization + one transposed solve per recorded substep*, plus
+gradient accumulation, which the forward has no analogue for):
+
+| phase | Norne fwd (57.5 s, 150 steps) | SPE9 fwd (2.7 s, 21 steps) |
+|---|---:|---:|
+| assembly (linearize) | 15.4 s (27 %) | 0.51 s (19 %) |
+| linear solve | 21.5 s (37 %) | 1.77 s (65 %) |
+| props/update (IQ) | 6.6 s (11 %) | 0.29 s (11 %) |
+| pre/post step | 13.7 s (24 %) | 0.02 s (1 %) |
+| output write | 0.09 s | — |
+
+Component-by-component (Norne):
+
+- **adjoint re-linearize 18.7 s ≈ forward assembly 15.4 s** — both re-assemble the
+  reservoir Jacobian; the adjoint does it once per substep (147×), the forward once per
+  Newton iteration (≈940 total). Per-linearization they match.
+- **adjoint transposed solve 32.8 s vs forward linear solve 21.5 s** — the adjoint does
+  one transposed solve per substep (147) at tight reduction; the forward does ≈940
+  looser iterative solves. Same order; the adjoint's per-solve cost is a bit higher
+  (tight tol, no warm start), and this is where cprt hierarchy reuse would help most.
+- **gradient accumulation 10 s has no forward analogue** — it is the price of the
+  derivative, objective-dependent (16 % here, 74 % on SPE9/matchref).
+
 - **Overhead factor:** one adjoint gradient (record + backward) ≈ **3× a forward run**
   on Norne (102 s record + 63 s sweep vs 57 s forward) and ≈ **10–12×** on SPE9 (the
   per-substep matchref objective loads the gradient phase). The sweep + record, not any
-  single piece, is the cost.
+  single piece, is the cost. Rule of thumb for the field target: **budget one gradient
+  at ≈ 3 forward runs** (a per-substep rate/BHP objective pushes that up via the
+  gradient phase; a direct solver pushes memory, not this factor).
 - **Memory knob = solver** (§ above). **Speed knob = gradient accumulation** (74 %):
   the general-AD path re-seeds and re-evaluates per cell each substep. Analytic
   accumulation is cheaper but per-family; a future speed win is reusing the AD
