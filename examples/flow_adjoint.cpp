@@ -46,6 +46,7 @@
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
 #include <opm/models/discretization/common/tpfalinearizer.hh>
 
+#include <opm/adjoint/AdjointConfigFile.hpp>
 #include <opm/adjoint/AdjointFlowProblem.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 #include <opm/adjoint/AdjointSolver.hpp>
@@ -179,10 +180,24 @@ int main(int argc, char** argv)
     // The run mode must be known before the parameter system is set up,
     // so peek at the raw command line.
     std::string mode;
+    std::string configPath;
     for (int i = 1; i < argc; ++i) {
         if (std::strncmp(argv[i], "--adjoint-mode=", 15) == 0) {
             mode = argv[i] + 15;
+        } else if (std::strncmp(argv[i], "--adjoint-config=", 17) == 0) {
+            configPath = argv[i] + 17;
         }
+    }
+    // A --adjoint-config JSON may declare the run mode, so a config file can be
+    // self-contained (ERT/Everest hand over only the JSON). An explicit
+    // --adjoint-mode on the command line always wins. A malformed config is
+    // ignored here and reported later by the normal parameter-resolution path.
+    if (mode.empty() && !configPath.empty()) {
+        try {
+            Opm::AdjointConfig cfg;
+            Opm::loadAdjointConfigFile(configPath, cfg);
+            mode = cfg.mode;
+        } catch (...) { /* reported downstream */ }
     }
 
     // Adjoint-appropriate defaults, injected as command-line arguments so

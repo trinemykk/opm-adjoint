@@ -68,6 +68,20 @@ General-AD is verified exact for PORO/PERM at field scale (SPE9 oracle: PV
 6e-16, PERM 1e-15), so `--adjoint-gradient-method=general-ad` is the
 recommended fast generic path (analytic remains the default oracle).
 
+**Slim's saving shrinks with cell count** (see `adjoint_storage_sizing.md`): on
+SPE1 (300 cells) it drops 57% of the snapshot (the schedule dominates), but on
+SPE9 (9000 cells) only **11%** — the per-cell `problem.bin` (history state,
+~152 B/cell) + `model.bin` (~62 B/cell) dominate and slim cannot touch them.
+Measured slim floor ≈ **230 B/cell/substep**. Consequence for field scale: an
+all-in-RAM tape is not viable (1 M-cell HM ≈ 100–450 GB); the field path is
+**disk-streaming** (what the A5 byte-budgeted spill converges to). Slim is a
+schedule-heavy-deck win, not the field-scale lever.
+
+**Known gap:** slim + `--adjoint-mode=objective` aborts in `Schedule::getWell`
+during `evaluateObjectiveOnly` (gradient / one-stop replay on slim is fine).
+Use the full archive for standalone objective-only replays until fixed
+(follow-up filed).
+
 ### Configuration file (`--adjoint-config=<file>.json`)
 
 A JSON config file (2026-07-23) replaces the grown `--adjoint-*` flag strings and
@@ -82,7 +96,40 @@ with per-term kind/wells/phase/reference_case/target_sm3_per_day/weight/
 window_days). Loader `AdjointConfigFile.hpp` (boost::property_tree); the
 TypeTag-free `AdjointObjectiveSpec.hpp` is shared by the CLI parser and the
 loader. Guarded by ctest `adjoint_config_spe1` (config == equivalent flags;
-CLI overrides JSON).
+CLI overrides JSON). The JSON `mode` is now honoured by the run-mode dispatch
+(the argv peek in `flow_adjoint.cpp` falls back to the config's `mode` when no
+`--adjoint-mode` is on the command line), so a config file is **self-contained**
+— ERT/Everest can hand over only the JSON and still select `onestop`.
+
+### Field-scale PORO history-match demo (A6, `adjoint_poro_field_demo_spe9`)
+
+End-to-end exercise of the **practical field configuration** on SPE9 (9000
+cells, 26 wells, DISGAS), ctest label `field`:
+
+- a perturbed-PORO **truth** run makes a reference summary;
+- the base run computes **dJ/dPORO for all 9000 cells in one process** via
+  `--adjoint-mode=onestop` + `--adjoint-config` (matchref, wildcard `PRODU*`
+  gas-rate, time window) + general-AD + cartesian-keyed CSV output;
+- the dominant-sensitivity cells are **FD-verified**: the top-6 cells by
+  |gradient| match central differences to **0.03 %–1.5 %** (delta 2e-4). Random
+  cells are *not* checked — near-zero gradients make the FD relative error
+  meaningless (central-difference cancellation), so the check targets the cells
+  that carry signal.
+
+Solvers (per field guidance): forward `cpr_trueimpes` (~2 s/run vs ~24 s for
+umfpack — umfpack refactorizes every Newton iteration, no symbolic reuse);
+backward stays **umfpack** (direct, accurate — proven for testing). `cprt`
+backward was re-validated here and is **essentially exact**: normalized by the
+field-max gradient it agrees with umfpack to **1.9e-9** (the earlier "10 %" was
+the *relative* metric on numerically-zero cells — misleading; use the
+field-normalized metric). Timing on SPE9: cprt gradient run 25.6 s vs umfpack
+32.4 s (~20 % on the whole run — init dominates, so the sweep-only speedup is
+larger). So cprt is a sound accurate backward solver already; its bigger payoff
+at field scale is **reusing the AMG hierarchy across the N transposed solves**
+of the backward sweep. **hypre**: `USE_HYPRE=ON` in the CMake cache but the
+opm-simulators `PreconditionerFactory` in this build does **not** register
+`hypre` (aborts: available = amg cpr cprt dilu …). Testing hypre needs
+opm-simulators rebuilt with hypre registration + a ≥10⁵-cell case to matter.
 
 ### Objective functions (`--adjoint-objective=`)
 

@@ -204,6 +204,17 @@ if(HAVE_OPM_TESTS)
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
               ${_testout}/dirderiv_general_spe9 pv pressure-average 1e-6 5e-3 1 1)
+    # A6: PORO history-match demo end to end — one-stop + JSON config + matchref
+    # wildcard objective + cartesian CSV output, FD-verified per-cell on the
+    # dominant-sensitivity cells. Heavier (~90s: truth + one-stop + FD forwards);
+    # labelled "field" so it can be selected/excluded (ctest -L field / -LE field).
+    add_test(NAME adjoint_poro_field_demo_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-poro-field-demo.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
+              ${_testout}/poro_field_demo_spe9)
+    set_tests_properties(adjoint_poro_field_demo_spe9
+      PROPERTIES LABELS field TIMEOUT 600)
   endif()
   if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
     add_test(NAME adjoint_replay_spe1
