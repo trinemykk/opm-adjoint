@@ -38,6 +38,19 @@ decks up to field models, and is guarded by a green ctest suite (**15/15**).
 | **Tests** | ctest **15/15**; FD-verified golden-reference regression set in `tests/references/`; per-eps FD accuracy study in [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md). |
 | **JutulDarcy cross-check** | Set up (`jutul/`); pattern/sign-level agreement (forwards differ by well model). FD remains the authoritative oracle. |
 
+### One-stop mode (`--adjoint-mode=onestop`)
+
+Runs the forward record and the backward sweep in a **single process**, sharing
+the recorded states through an **in-memory archive** (no files, no re-reading a
+large archive per optimizer iteration). Low-risk: the in-memory backend
+(`AdjointMemStore`) reuses the exact `Serializer<MemPacker>` packing of the
+directory store — byte-identical buffers, only the medium changes. Verified
+byte-identical to the two-process run (ctest `adjoint_onestop_spe1`), zero state
+files. **Combine with `--adjoint-slim=true`** for the practical field config:
+in-RAM, minimal footprint, byte-identical. shared_ptr archive ctors on
+Recorder/Replay/Solver; `AdjointFlowProblem::oneStopArchive()` injects it into
+the forward recorder.
+
 ### Slim archive (`--adjoint-slim=true`)
 
 The per-substep snapshot serialized the full Eclipse Schedule (via the
