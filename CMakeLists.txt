@@ -165,6 +165,16 @@ if(HAVE_OPM_TESTS)
               $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
               ${_testout}/solver_m1d)
   endif()
+  # Slim archive (no serialized schedule) == full, byte-identical gradients,
+  # on the group-control/guide-rate deck (the state most at risk if slim drops
+  # something). Guarded here; gated on the SPE1_GRPCTRL deck existing.
+  if(EXISTS ${OPM_TESTS_ROOT}/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA)
+    add_test(NAME adjoint_slim_grpctrl
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-slim-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
+              ${_testout}/slim_grpctrl)
+  endif()
   # Group-control gradient: FD-verified on SPE1 under GCONPROD group
   # control - proves the adjoint gradient is correct when wells follow a
   # group target, not just single-well control (the field-relevant case).

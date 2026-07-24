@@ -47,6 +47,7 @@ AdjointConfig AdjointConfig::fromParameters()
     override_(config.save,             Parameters::AdjointSave{});
     override_(config.mode,             Parameters::AdjointMode{});
     override_(config.saveSystem,       Parameters::AdjointSaveSystem{});
+    override_(config.slim,             Parameters::AdjointSlim{});
     override_(config.path,             Parameters::AdjointFile{});
     override_(config.replayTolerance,  Parameters::AdjointReplayTolerance{});
     override_(config.replayAbsTolerance, Parameters::AdjointReplayAbsTolerance{});
@@ -91,6 +92,10 @@ void registerAdjointParameters()
     Parameters::Register<Parameters::AdjointSaveSystem>
         ("Also store the converged residual and Jacobian of every accepted "
          "substep in the adjoint archive (verification data for replay tests)");
+    Parameters::Register<Parameters::AdjointSlim>
+        ("Store slim per-substep snapshots (dynamic state only, skip the static "
+         "Eclipse schedule reconstructed at replay); much smaller archives, off "
+         "by default; not for runtime schedule-modifying (ACTIONX) decks");
     Parameters::Register<Parameters::AdjointFile>
         ("Path of the adjoint archive. Empty means <output-dir>/<CASENAME>.ADJOINT[.h5]. "
          "A path ending in .h5/.hdf5 selects the HDF5 backend, anything else "

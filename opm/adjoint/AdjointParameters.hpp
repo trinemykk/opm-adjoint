@@ -43,6 +43,14 @@ struct AdjointConfig { static constexpr auto value = ""; };
 //! \brief Record per-substep simulation state for later adjoint/replay runs.
 struct AdjointSave { static constexpr bool value = false; };
 
+//! \brief Store SLIM per-substep snapshots: the dynamic state only (model
+//!        solution, problem, summary/UDQ/action state), skipping the static
+//!        Eclipse schedule (reconstructed from the deck at replay). Much
+//!        smaller archives; OFF by default (the full snapshot is the proven
+//!        path). Not for decks that modify the schedule at runtime (ACTIONX
+//!        that alters the schedule) — those need the full archive.
+struct AdjointSlim { static constexpr bool value = false; };
+
 //! \brief Additionally store the converged residual and Jacobian of every
 //!        accepted substep ("write too much" verification data for the
 //!        replay tests).
@@ -134,6 +142,7 @@ struct AdjointConfig
     bool save{false};         //!< record per-substep state
     std::string mode{};       //!< "" (forward) or "replay"
     bool saveSystem{false};   //!< also dump residual/Jacobian per substep
+    bool slim{false};         //!< slim snapshots (skip serialized schedule)
     std::string path{};       //!< archive path ("" = derive from case name)
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};

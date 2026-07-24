@@ -296,7 +296,19 @@ private:
         wellModel_().prepareDeserialize(reportStepForWells);
         const std::string group = (k < 0) ? AdjointGroups::initial()
                                           : AdjointGroups::substep(k);
-        archive_->read(simulator_, group, "simulator");
+        if (meta_.slim) {
+            // Symmetric with AdjointRecorder::writeSnapshot_: restore the
+            // dynamic state; the schedule stays the deck-reconstructed one and
+            // time/episode are set from meta by the caller (replayStep).
+            auto& v = simulator_.vanguard();
+            archive_->read(simulator_.model(),   group, "model");
+            archive_->read(simulator_.problem(), group, "problem");
+            archive_->read(v.summaryState(),     group, "summary");
+            archive_->read(v.udqState(),         group, "udq");
+            archive_->read(v.actionState(),      group, "action");
+        } else {
+            archive_->read(simulator_, group, "simulator");
+        }
         model_().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
     }
 

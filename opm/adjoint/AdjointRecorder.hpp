@@ -70,6 +70,7 @@ public:
 
         meta_.systemSaved = config_.saveSystem;
         meta_.storageCacheEnabled = Parameters::Get<Parameters::EnableStorageCache>();
+        meta_.slim = config_.slim;
         meta_.caseName = simulator_.vanguard().caseName();
 
         checkConfiguration_();
@@ -85,7 +86,26 @@ public:
         // Sync the internal WGState copies so the snapshot can later be
         // read against a prepareDeserialize()'d well model in replay.
         normalizeWGStateForSerialization(simulator_.problem().wellModel());
-        archive_->write(simulator_, AdjointGroups::initial(), "simulator");
+        writeSnapshot_(AdjointGroups::initial());
+    }
+
+    //! \brief Write one snapshot. Full = the whole simulator (proven). Slim =
+    //!        the dynamic state only (model solution, problem, summary/UDQ/
+    //!        action), skipping the static schedule + time scalars that the
+    //!        replay reconstructs from the deck and meta. Symmetric with
+    //!        AdjointReplay::loadSnapshot_.
+    void writeSnapshot_(const std::string& group)
+    {
+        if (config_.slim) {
+            auto& v = simulator_.vanguard();
+            archive_->write(simulator_.model(),   group, "model");
+            archive_->write(simulator_.problem(), group, "problem");
+            archive_->write(v.summaryState(),     group, "summary");
+            archive_->write(v.udqState(),         group, "udq");
+            archive_->write(v.actionState(),      group, "action");
+        } else {
+            archive_->write(simulator_, group, "simulator");
+        }
     }
 
     //! \brief Record an accepted substep; call after problem.endTimeStep()
@@ -102,9 +122,13 @@ public:
         const int k = static_cast<int>(meta_.substeps.size());
         const std::string group = AdjointGroups::substep(k);
 
-        archive_->write(simulator_, group, "simulator");
-        auto& wellModel = simulator_.problem().wellModel();
-        archive_->write(wellModel, group, "wgstate");
+        writeSnapshot_(group);
+        if (!config_.slim) {
+            // Retained for the full (proven) format; the well/group state is
+            // already inside the problem snapshot, so slim omits this.
+            auto& wellModel = simulator_.problem().wellModel();
+            archive_->write(wellModel, group, "wgstate");
+        }
 
         if (config_.saveSystem) {
             recordSystem_(group);

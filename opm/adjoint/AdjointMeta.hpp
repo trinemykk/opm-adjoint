@@ -73,6 +73,7 @@ struct AdjointMeta
     int schemaVersion{currentSchemaVersion};
     bool systemSaved{false};        //!< residual/Jacobian dumps present
     bool storageCacheEnabled{true}; //!< EnableStorageCache of the forward run
+    bool slim{false};               //!< slim snapshots (no serialized schedule)
     std::string caseName{};
     std::vector<AdjointSubstepMeta> substeps;
 
@@ -82,6 +83,7 @@ struct AdjointMeta
         serializer(schemaVersion);
         serializer(systemSaved);
         serializer(storageCacheEnabled);
+        serializer(slim);
         serializer(caseName);
         serializer(substeps);
     }
@@ -91,6 +93,7 @@ struct AdjointMeta
         return schemaVersion == rhs.schemaVersion &&
                systemSaved == rhs.systemSaved &&
                storageCacheEnabled == rhs.storageCacheEnabled &&
+               slim == rhs.slim &&
                caseName == rhs.caseName &&
                substeps == rhs.substeps;
     }

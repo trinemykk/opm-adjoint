@@ -182,6 +182,7 @@ inline void loadAdjointConfigFile(const std::string& path, AdjointConfig& config
         if (auto v = arc->get_optional<std::string>("path"))  config.path = *v;
         if (auto v = arc->get_optional<bool>("save"))         config.save = *v;
         if (auto v = arc->get_optional<bool>("save_system"))  config.saveSystem = *v;
+        if (auto v = arc->get_optional<bool>("slim"))         config.slim = *v;
     }
     if (const auto grad = pt.get_child_optional("gradient")) {
         if (auto v = grad->get_optional<std::string>("method"))
