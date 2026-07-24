@@ -269,6 +269,15 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-onestop-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/onestop_spe1)
+    # Multisegment-well smoke test: MSW records + reservoir gradients work;
+    # MSW well-objective gradients are cleanly rejected (StandardWell-only,
+    # until task #16 / the --use-multisegment-well=always converter).
+    if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA)
+      add_test(NAME adjoint_msw_smoke_spe1
+        COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-msw-test.sh
+                $<TARGET_FILE:flow_adjoint>
+                ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA ${_testout}/msw_spe1)
+    endif()
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>

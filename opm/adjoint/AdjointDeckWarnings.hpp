@@ -215,16 +215,31 @@ inline void warnAdjointDeckApproximations(const Simulator& simulator)
     append(approxGradient, "approx-gradient");
     append(approxReplay, "approx-replay");
     append(neglected, "neglected");
-    // Standing caveat: every multi-connection well carries explicitly-updated
-    // quantities (hydrostatic connection pressure drop from prior-state perf
-    // densities, wellbore-storage F0_, explicit B-factors). These are
+    // Standing caveat: every multi-connection standard well carries explicitly-
+    // updated quantities (hydrostatic connection pressure drop from prior-state
+    // perf densities, wellbore-storage F0_, explicit B-factors). These are
     // recomputed exactly in replay (so J is exact), but their cross-step
-    // derivative is neglected in dJ/dm. Printed only when something else is
-    // already non-exact, to avoid flagging every deck.
-    msg += "  [approx-gradient] well explicit quantities (connection "
-           "hydrostatic pressure drop, wellbore-storage F0, explicit "
-           "B-factors): recomputed exactly in replay; the cross-step "
-           "derivative is neglected in dJ/dm.\n";
+    // derivative is neglected in dJ/dm. The hydrostatic term is the material
+    // one: perf_pressure_diffs_ = dz*rho*g is a Scalar computed once per step in
+    // StandardWell::calculateExplicitQuantities and enters the drawdown, so its
+    // state derivative is absent from the well Jacobian the adjoint reuses. This
+    // is NEGLIGIBLE for thin / single-perforation wells (~0 head) but can reach
+    // O(10%) on well BHP / rate objectives for thick, multi-layer wells
+    // (measured ~12% on Norne D-1H). It is NOT practically fixable: the wellbore
+    // density depends on the flowing mixture, i.e. on essentially all reservoir
+    // state around the well, so an exact derivative is dense and expensive; the
+    // explicit treatment is a legacy of the reference simulator. Multisegment
+    // (WELSEGS) wells solve segment pressures implicitly and do NOT have this
+    // approximation — use an MSW-equivalent deck if exact well-objective
+    // gradients on gravity-dominated wells are required (needs MSW adjoint).
+    msg += "  [approx-gradient] STANDARD-well explicit hydrostatic head "
+           "(connection pressure drop from prior-step perf densities): "
+           "recomputed exactly in replay, but its cross-step derivative is "
+           "neglected in dJ/dm. Small for thin wells; up to ~10% on BHP/rate "
+           "objectives for thick multi-perforation wells (legacy explicit "
+           "treatment; not practically fixable — density couples to all "
+           "near-well reservoir state; MSW wells avoid it). Also: wellbore-"
+           "storage F0 and explicit B-factors (same cross-step caveat).\n";
     msg += "  Replay and gradients are exact for everything else (FD-verified: "
            "porosity/PV, transmissibility, permeability, end-point scaling, "
            "well and group control).";
