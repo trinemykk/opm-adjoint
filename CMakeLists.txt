@@ -295,6 +295,15 @@ if(HAVE_OPM_TESTS)
                 $<TARGET_FILE:flow_adjoint>
                 ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA ${_testout}/fd_msw_wellobj_spe1)
     endif()
+    # Simple standard-well -> multisegment-well converter
+    # (--convert-to-multisegment-well): the converted deck must run with working
+    # MSW wells (none shut) and reproduce the standard-well production.
+    if(EXISTS ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA)
+      add_test(NAME adjoint_convert_msw_spe9
+        COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-convert-msw-test.sh
+                $<TARGET_FILE:flow_adjoint>
+                ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA ${_testout}/convert_msw_spe9)
+    endif()
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>
