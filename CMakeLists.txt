@@ -304,6 +304,18 @@ if(HAVE_OPM_TESTS)
                 $<TARGET_FILE:flow_adjoint>
                 ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA ${_testout}/convert_msw_spe9)
     endif()
+    # StandardWell frozen-hydrostatic-head gradient bias, and its removal by the
+    # MSW conversion, on a controlled deck (dead oil + dry gas + water, no
+    # DISGAS/DRSDT/hysteresis/groups, a free-gas cap making the wellbore density
+    # state-dependent, deep multi-perforation well): the StandardWell bhp:PROD
+    # gradient is biased (~1% here), the converted-MSW gradient is exact.
+    if(EXISTS ${OPM_TESTS_ROOT}/adjoint_tests/DEEPWELL/DEEPWELL.DATA)
+      add_test(NAME adjoint_fd_deepwell_msw
+        COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-deepwell-test.sh
+                $<TARGET_FILE:flow_adjoint>
+                ${OPM_TESTS_ROOT}/adjoint_tests/DEEPWELL/DEEPWELL.DATA
+                ${_testout}/fd_deepwell_msw)
+    endif()
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
               $<TARGET_FILE:flow_adjoint>
