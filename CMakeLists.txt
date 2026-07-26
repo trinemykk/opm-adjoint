@@ -216,6 +216,15 @@ if(HAVE_OPM_TESTS)
               ${_testout}/solver_spe9 1e-7 cprt)
     set_tests_properties(adjoint_solver_spe9 PROPERTIES
       LABELS field TIMEOUT 600 ENVIRONMENT "METRIC=field")
+    # Larger parallel gate: np=2 gradients on SPE9 (9000 cells) must match the
+    # serial cprt reference — the field-scale check the tiny SPE1 mpi test cannot
+    # provide. Exercises the parallel transposed CPR on the consistent transpose
+    # M=A^T. Skips itself when no MPI launcher is present.
+    add_test(NAME adjoint_mpi_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-mpi-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA ${_testout}/mpi_spe9 2 1e-3)
+    set_tests_properties(adjoint_mpi_spe9 PROPERTIES LABELS field TIMEOUT 600)
     # A6: PORO history-match demo end to end — one-stop + JSON config + matchref
     # wildcard objective + cartesian CSV output, FD-verified per-cell on the
     # dominant-sensitivity cells. Heavier (~90s: truth + one-stop + FD forwards);
@@ -352,3 +361,17 @@ endif()
 # is an ABI break in classes with assertion-only members).
 include(UseOptimization)
 use_additional_optimization(TARGET flow_adjoint)
+
+# Standalone MPI unit test for the consistent parallel transpose M = A^T
+# (buildConsistentParallelTranspose): decoupled from the simulator, it
+# checks every owned row of the distributed transpose against the serial
+# transpose on 2/3/4 ranks. Built unconditionally (no opm-tests needed);
+# the driver self-skips when no MPI launcher is present.
+if(USE_MPI)
+  add_executable(test_parallelTranspose tests/test_parallelTranspose.cpp)
+  target_link_libraries(test_parallelTranspose PUBLIC opmadjoint)
+  use_additional_optimization(TARGET test_parallelTranspose)
+  add_test(NAME adjoint_parallel_transpose
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/run-parallel-transpose-test.sh
+            $<TARGET_FILE:test_parallelTranspose> 2 3 4)
+endif()

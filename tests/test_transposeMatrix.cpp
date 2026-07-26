@@ -25,6 +25,8 @@
 #define BOOST_TEST_MODULE TransposeMatrixTest
 #include <boost/test/unit_test.hpp>
 
+#include <opm/simulators/linalg/matrixblock.hh>
+
 #include <dune/common/fmatrix.hh>
 #include <dune/common/fvector.hh>
 #include <dune/istl/bcrsmatrix.hh>
@@ -36,9 +38,13 @@
 
 namespace {
 
-using Block = Dune::FieldMatrix<double, 2, 2>;
+// 3x3 blocks (the blackoil numEq): AdjointLinearSolver's parallel path is
+// pre-instantiated (opm-simulators FlexibleSolver/PreconditionerFactory) only
+// for Opm::MatrixBlock<double,3,3>, so the solver test must use that type.
+constexpr int BS = 3;
+using Block = Opm::MatrixBlock<double, BS, BS>;
 using Matrix = Dune::BCRSMatrix<Block>;
-using Vector = Dune::BlockVector<Dune::FieldVector<double, 2>>;
+using Vector = Dune::BlockVector<Dune::FieldVector<double, BS>>;
 
 // A small nonsymmetric block tri-diagonal matrix with full asymmetric blocks.
 Matrix makeTestMatrix()
@@ -60,8 +66,8 @@ Matrix makeTestMatrix()
     double value = 1.0;
     for (auto row = matrix.begin(); row != matrix.end(); ++row) {
         for (auto entry = row->begin(); entry != row->end(); ++entry) {
-            for (int i = 0; i < 2; ++i) {
-                for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < BS; ++i) {
+                for (int j = 0; j < BS; ++j) {
                     (*entry)[i][j] = value;
                     value = std::fmod(value * 1.7 + 0.3, 5.0) + 0.1;
                 }
@@ -69,8 +75,9 @@ Matrix makeTestMatrix()
             // Make diagonal blocks strongly dominant so the matrix is
             // comfortably invertible for the solver test.
             if (entry.index() == row.index()) {
-                (*entry)[0][0] += 25.0;
-                (*entry)[1][1] += 25.0;
+                for (int e = 0; e < BS; ++e) {
+                    (*entry)[e][e] += 25.0;
+                }
             }
         }
     }
@@ -104,8 +111,8 @@ BOOST_AUTO_TEST_CASE(MatrixTransposeEntries)
         for (auto entry = row->begin(); entry != row->end(); ++entry) {
             const auto& original = *entry;
             const auto& mirrored = transposed[entry.index()][row.index()];
-            for (int i = 0; i < 2; ++i) {
-                for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < BS; ++i) {
+                for (int j = 0; j < BS; ++j) {
                     BOOST_CHECK_EQUAL(mirrored[i][j], original[j][i]);
                 }
             }
@@ -118,8 +125,8 @@ BOOST_AUTO_TEST_CASE(MatrixTransposeEntries)
         for (auto entry = row->begin(); entry != row->end(); ++entry) {
             const auto& original = *entry;
             const auto& restored = twice[row.index()][entry.index()];
-            for (int i = 0; i < 2; ++i) {
-                for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < BS; ++i) {
+                for (int j = 0; j < BS; ++j) {
                     BOOST_CHECK_EQUAL(restored[i][j], original[i][j]);
                 }
             }
@@ -135,8 +142,9 @@ BOOST_AUTO_TEST_CASE(TransposeMatVecConsistency)
 
     Vector x(matrix.N());
     for (std::size_t i = 0; i < x.size(); ++i) {
-        x[i][0] = 1.0 + static_cast<double>(i);
-        x[i][1] = -0.5 * static_cast<double>(i + 1);
+        for (int j = 0; j < BS; ++j) {
+            x[i][j] = 1.0 + static_cast<double>(i) - 0.5 * j;
+        }
     }
 
     Vector viaExplicit(matrix.M());
@@ -148,7 +156,7 @@ BOOST_AUTO_TEST_CASE(TransposeMatVecConsistency)
     matrix.umtv(x, viaUmtv);
 
     for (std::size_t i = 0; i < viaExplicit.size(); ++i) {
-        for (int j = 0; j < 2; ++j) {
+        for (int j = 0; j < BS; ++j) {
             BOOST_CHECK_CLOSE(viaExplicit[i][j], viaUmtv[i][j], 1e-12);
         }
     }
@@ -161,8 +169,9 @@ BOOST_AUTO_TEST_CASE(SolveTransposed)
 
     Vector rhs(matrix.M());
     for (std::size_t i = 0; i < rhs.size(); ++i) {
-        rhs[i][0] = 1.0;
-        rhs[i][1] = static_cast<double>(i) - 2.0;
+        for (int j = 0; j < BS; ++j) {
+            rhs[i][j] = 1.0 + j * (static_cast<double>(i) - 2.0);
+        }
     }
 
     Opm::AdjointLinearSolver<Matrix, Vector> solver;
@@ -175,7 +184,9 @@ BOOST_AUTO_TEST_CASE(SolveTransposed)
 
     double norm = 0.0;
     for (std::size_t i = 0; i < residual.size(); ++i) {
-        norm = std::max({norm, std::abs(residual[i][0]), std::abs(residual[i][1])});
+        for (int j = 0; j < BS; ++j) {
+            norm = std::max(norm, std::abs(residual[i][j]));
+        }
     }
     BOOST_CHECK_SMALL(norm, 1e-10);
 }

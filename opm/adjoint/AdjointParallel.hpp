@@ -28,11 +28,13 @@
  * overlap rows do not carry the off-diagonal entries that complete an
  * interior column - so the cross-rank coupling A_{ki} (k interior on
  * another rank) is missing. This was verified empirically: the local
- * transpose gives wrong gradients for np>=3. The exact transposed
- * operator (see TransposedParallelOperator in AdjointLinearSolver.hpp)
- * fixes this by scattering A^T over the forward matrix's complete
- * interior rows and communicating the overlap contributions back to
- * their owners. Wells are never split across ranks, so the well Schur
+ * transpose gives wrong gradients for np>=3. The fix builds the exact,
+ * parallel-consistent transpose M = A^T explicitly
+ * (buildConsistentParallelTranspose in parallelTransposeMatrix.hpp):
+ * each rank sends its interior-row blocks that sit in a remotely-owned
+ * column to that column's owner, which stores them so its owned rows form
+ * complete transposed columns. M then plugs into opm's standard parallel
+ * CPR unchanged. Wells are never split across ranks, so the well Schur
  * complement only couples interior cells of one rank and needs no
  * special treatment.
  */

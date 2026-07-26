@@ -67,9 +67,15 @@ struct AdjointMode { static constexpr auto value = ""; };
 struct AdjointFile { static constexpr auto value = ""; };
 
 //! \brief Linear solver for the transposed adjoint systems:
-//!        umfpack (direct, default) | ilu0 | cpr | cprt | <file>.json
+//!        auto (default) | umfpack (direct) | ilu0 | cpr | cprt | <file>.json
 //!        (FlexibleSolver configuration).
-struct AdjointLinearSolver { static constexpr auto value = "umfpack"; };
+//!        "auto" selects by problem size: umfpack (exact) for small cases —
+//!        the verification oracle — and cprt (transposed CPR, ~forward memory)
+//!        above a modest cell count, because umfpack's LU fill is super-linear
+//!        (26x forward RAM on SPE9, OOM at field scale). Parallel runs pick an
+//!        iterative solver regardless (umfpack is single-rank). Any explicit
+//!        value here overrides the auto choice.
+struct AdjointLinearSolver { static constexpr auto value = "auto"; };
 
 //! \brief Relative residual reduction for iterative adjoint solves.
 //!        Tighter than forward solves: lambda accuracy multiplies dR/dm
@@ -159,7 +165,8 @@ struct AdjointConfig
     //! mixed families). Empty => parse `objective`.
     std::optional<Adjoint::ObjectiveSpec> objectiveSpec{};
     std::string endpoints{};  //!< end-point parameter list
-    std::string linearSolver{};  //!< adjoint linear solver spec
+    std::string linearSolver{"auto"};  //!< adjoint linear solver spec; "auto"
+                                       //!< = size-based (umfpack small / cprt large)
     double linearSolverReduction{1e-14};
     int linearSolverMaxIter{300};
     int linearSolverVerbosity{0};

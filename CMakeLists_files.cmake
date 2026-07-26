@@ -29,5 +29,6 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/adjoint/AdjointStorage.hpp
   opm/adjoint/AdjointSystemIO.hpp
   opm/adjoint/AdjointWellModel.hpp
+  opm/adjoint/parallelTransposeMatrix.hpp
   opm/adjoint/transposeMatrix.hpp
 )

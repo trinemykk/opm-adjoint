@@ -22,10 +22,15 @@ sizes as forward?), **tape storage** (RAM vs disk), and **wall-clock overhead**.
   snapshot is serialized and handed to the archive, not held) and, on these cases,
   <1 ms/snapshot. "IO is not free" — true — but at these sizes it is a rounding error
   next to the sweep; the note quantifies it rather than assuming it away.
-- **Backward wall-clock is dominated by gradient accumulation, not the solve**: 74 %
-  of the SPE9 sweep is general-AD gradient accumulation, 24 % the transposed solve.
-  So the *memory* lever (solver) and the *speed* lever (gradient accumulation) are
-  different knobs.
+- **Backward wall-clock (rebuilt 2026-07-25 — the numbers below in "Performance" are
+  the ORIGINAL profile; superseded).** The sweep was found to be dominated not by
+  gradient accumulation but by the **dCTF/dperm well term** doing whole-domain
+  re-linearizations per perforation per substep (96 % of the SPE9 sweep). Made analytic
+  (exact, O(perforations)); with that + cprt-default + preconditioner reuse + a dead-load
+  removal, the **SPE9 sweep went 24 s → 1 s and Norne 71 s → 8.9 s (0.62× forward)**, and
+  the sweep now scales ~linearly. See STATUS.md "Memory & performance" for the current
+  profile; the per-phase figures in the "Performance" section below are retained as the
+  pre-optimization baseline.
 - **Tape storage is a real but second-order constraint** (details below): the
   two-process/disk path streams it at ~forward memory; only the in-RAM one-stop must
   hold the whole tape, so one-stop is a dev/small-case convenience and the field path
@@ -140,14 +145,54 @@ Component-by-component (Norne):
 ## hypre for the coarse (pressure) solve
 
 `tests/adjoint-cprt-hypre.json` configures the backward solver as transposed CPR
-(`cprt`) with **hypre BoomerAMG as the coarse/pressure solve** — the accurate,
-memory-light replacement for umfpack at field scale. **Not yet runnable in this
-build:** `USE_HYPRE=ON` is in the CMake cache but `HAVE_HYPRE` was never written into
-`config.h`, so the `hypre` preconditioner is not registered (runtime abort:
-`available = amg cpr cprt dilu …`). Enabling it means rebuilding `opm-simulators`
-with hypre actually detected; hypre only pays off at ≥10⁵ cells, so it belongs with
-the Norne/field bring-up. The `amg` coarse solver (registered) is the drop-in
-stand-in meanwhile (`coarsesolver.preconditioner.type: amg`).
+(`cprt`) with **hypre BoomerAMG as the coarse/pressure solve** — intended as the
+memory-light replacement for umfpack at field scale.
+
+**Now built and registered (2026-07, this machine).** `USE_HYPRE=ON` + `USE_MPI=ON`
+and the opm-adjoint `CMakeLists` links `HYPRE::HYPRE` **PUBLIC**, so the target's
+`HAVE_HYPRE=1` interface definition reaches `flow_adjoint` (the `HyprePreconditioner`
+symbol is in the binary and the config runs — no more "not registered" abort). Note
+`HAVE_HYPRE` is a *compile definition carried by the imported target*, not a `config.h`
+entry, which is why grepping `config.h` for it finds nothing.
+
+**But measured: hypre-coarse is NOT the default and does not yet pay off here.** Two
+findings from running it:
+1. **Tolerance trap (fixed):** the json's outer `tol` must be tight (**1e-14**, matching
+   the default adjoint reduction). The earlier `tol: 1e-2` let the backward solve stop
+   early → **~38% gradient error vs umfpack**. The shipped json is now `tol 1e-14`,
+   `maxiter 300`.
+2. **hypre-coarse loses to the built-in dune-istl AMG coarse of the plain `cprt` preset
+   at every reachable scale:** SPE9 (9k) it is ~15% slower (0.52 s vs 0.45 s, both
+   accurate to ~1e-13); **Norne (44k) the transposed system fails to converge to 1e-14
+   (stalls ~5e-9 in 300 iters) and aborts.** Even the json-based `amg` coarse
+   (`coarsesolver.preconditioner.type: amg`, which does converge) is slower than the
+   `cprt` preset on Norne (6.5 s vs 4.6 s).
+
+**Conclusion:** keep the default `auto`/`cprt` path — it wins at ≤44k. hypre only becomes
+worthwhile with (a) a ≥10⁵-cell case *and* (b) BoomerAMG options tuned for the transposed
+adjoint system (strong-threshold / coarsening / relaxation); it is not a drop-in win as
+written. The `amg` coarse json is the working (if slower) stand-in
+(`coarsesolver.preconditioner.type: amg`).
+
+**Why strict tolerance is non-negotiable for the backward solve (general principle).** The
+adjoint sweep is a *single linear solve* per substep — there is no outer nonlinear loop to
+absorb an inaccurate solve, so the linear reduction *is* the gradient accuracy (`λ` error
+multiplies `dR/dm` straight into `dJ/dm`). Contrast the forward run, where each Newton step's
+linear solve can be loose because the surrounding nonlinear iteration corrects it. So any
+adjoint linear-solver config (cprt preset or json) must use a tight reduction (default
+`1e-14`); the json's original `1e-2` produced ~38% gradient error. Corollary worth testing:
+where the substep's nonlinear coupling is weak (near-linear residual), the solve should
+converge to strict tolerance cheaply, so a tight target costs little — another reason not to
+loosen it.
+
+**OPEN — investigate coarse/AMG settings for the *transposed* system.** The transposed CPR
+system is not spectrally identical to the forward pressure system BoomerAMG's defaults are
+tuned for; the Norne stall (~5e-9, no convergence to 1e-14) is most likely mis-tuned
+coarsening/smoothing on the transpose, not a fundamental limit. Worth a dedicated sweep of
+BoomerAMG strong-threshold, coarsening (HMIS/PMIS vs Falgout), relaxation (hybrid-GS vs
+`ℓ1`), and cycle type on the transposed operator before judging hypre unusable at field
+scale. The built-in dune-istl AMG coarse converges on the same system, which is evidence the
+problem is hypre *settings*, not the transposed formulation.
 
 ---
 
@@ -252,15 +297,25 @@ another reason it belongs on scratch disk, streamed, not in RAM.
 
 ## Recommendation
 
-- **Default the field path to disk-streaming**, with the RAM budget as the knob:
-  in-RAM below the budget, spill above it (regimes 1→2 on one code path). Keep the
-  pure in-RAM one-stop as the small-case / dev default.
-- **Do not invest further in slimming `problem.bin`** as the field lever — it is
-  risk-heavy (the user's "wrong storing introduces hard-to-find bugs") and, per the
-  SPE9 crossover, buys little at scale. Any such trim must stay gated by the
-  full-vs-slim byte-identity test. The field lever is *where* the tape lives (disk),
-  not *how small* each snapshot is.
-- **Checkpoint-recompute** only if a concrete case is disk-bound.
+- **Default the field path to disk-streaming.** The two-process record-to-disk path
+  already does this at O(1–2 substeps) peak RAM — so field-scale disk placement exists
+  today. Keep the pure in-RAM one-stop as the small-case / dev default.
+- **A5 / WS2 (byte-budgeted spill) does NOT reduce storage** and is DEFERRED (2026-07-25
+  decision). It only relocates the *one-stop* mode's in-RAM tape to disk above a budget —
+  a code-path-unification convenience over the already-existing two-process disk stream.
+  Total bytes stored are unchanged (still 230 B/cell/substep). Because it sits on the
+  storage↔initialization/replay-reinit path ("wrong storing → hard-to-find bugs") for
+  zero storage payoff, it is not worth the correctness risk while performance is adequate.
+  Revisit only if a single-process in-RAM run is specifically needed on a case whose tape
+  exceeds node RAM.
+- **Do not invest further in slimming `problem.bin`** as the field lever — risk-heavy and,
+  per the SPE9 crossover, buys little at scale. Gate any trim by the full-vs-slim
+  byte-identity test.
+- **Checkpoint-recompute is the only real "reduce storage significantly" lever** (store
+  O(√N)/O(log N) checkpoints, recompute forward segments — Griewank/Revolve). It is also
+  the most correctness-critical: the recompute must be *bitwise-exact*, so it is coupled
+  to the bitwise-replay work (#22) and is a deliberate future effort, not a quick win.
+  Only pursue when a concrete case is genuinely disk-bound.
 
 ## Open follow-ups
 

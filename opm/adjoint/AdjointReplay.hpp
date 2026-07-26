@@ -49,6 +49,7 @@
 #include <opm/adjoint/AdjointResidualEvaluator.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <type_traits>
 
@@ -187,12 +188,13 @@ public:
         const auto& meta = meta_.substeps[k];
         const auto& schedule = simulator_.vanguard().schedule();
 
-        // Phase A: extract the converged solution x_k from snapshot k.
-        loadSnapshot_(k, meta.reportStep);
-        SolutionVector convergedSolution = model_().solution(/*timeIdx=*/0);
-
-        // Phase B: restore the state at the end of substep k-1 (the initial
-        // state for k == 0).
+        // Restore the state at the end of substep k-1 (the initial state for
+        // k == 0). WS6a: a former "Phase A" load of snapshot k was here to
+        // extract its converged solution, but that value was discarded and the
+        // snapshot is fully re-loaded below (after the Bdiag capture), and this
+        // k-1 load overwrites all deserialized state anyway — so the extra load
+        // was dead work (one of three per substep) and is removed. Guarded by
+        // the replay-residual comparison (compareWithStored_) staying at floor.
         const int prevReport = (k > 0) ? meta_.substeps[k - 1].reportStep
                                        : meta.reportStep;
         loadSnapshot_(k - 1, prevReport);
@@ -249,7 +251,6 @@ public:
         // guide rates). The snapshot stores solution(0)=x_k and
         // solution(1)=x_{k-1}, so the storage term R(x_k, x_{k-1}) is
         // reproduced; the Bdiag cross term was already captured above.
-        static_cast<void>(convergedSolution);
         loadSnapshot_(k, meta.reportStep);
         simulator_.setTime(meta.startTime);
         simulator_.setTimeStepSize(meta.dt);
@@ -292,6 +293,12 @@ public:
     Simulator& simulator()
     { return simulator_; }
 
+    //! \brief WS6 instrumentation: total time in loadSnapshot_ (deserialize +
+    //!        IQ update) and the number of such calls across the sweep. Three
+    //!        loads per replayStep today; the Phase-A load is the WS6a target.
+    double loadSnapshotSeconds() const { return loadSnapshotSeconds_; }
+    int loadSnapshotCalls() const { return loadSnapshotCalls_; }
+
 private:
     auto& model_()
     { return simulator_.model(); }
@@ -305,6 +312,8 @@ private:
     //! \brief Full restore of snapshot \p k (k == -1 means the initial state).
     void loadSnapshot_(int k, int reportStepForWells)
     {
+        const auto t0 = std::chrono::steady_clock::now();
+        ++loadSnapshotCalls_;
         wellModel_().prepareDeserialize(reportStepForWells);
         const std::string group = (k < 0) ? AdjointGroups::initial()
                                           : AdjointGroups::substep(k);
@@ -322,6 +331,8 @@ private:
             archive_->read(simulator_, group, "simulator");
         }
         model_().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+        loadSnapshotSeconds_ += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
     }
 
     void captureBdiag_(double dt)
@@ -504,6 +515,8 @@ private:
     std::unique_ptr<Matrix> checkMat_;
     std::unique_ptr<typename AdjointResidualEvaluator<TypeTag>::SeparateIQ>
         sepIQ_;
+    double loadSnapshotSeconds_{0.0};  //!< WS6 instrumentation
+    int loadSnapshotCalls_{0};
 };
 
 } // namespace Opm

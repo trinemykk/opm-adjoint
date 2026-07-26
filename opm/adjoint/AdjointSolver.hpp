@@ -73,6 +73,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <string>
@@ -128,19 +129,20 @@ public:
         constexpr std::size_t pressureIndex =
             GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
         std::string linearSolver = config_.linearSolver;
-        if (linearSolver == "auto") {
+        if (linearSolver == "auto" || linearSolver.empty()) {
             // Size-based backward-solver selection. umfpack is the exact
             // small-case oracle, but its LU fill is super-linear (26x forward
             // RAM on SPE9, OOM at field scale), so switch to the iterative
             // transposed-CPR solver above a modest cell count — cprt keeps the
             // adjoint at ~forward memory. Parallel runs cannot use umfpack
-            // (single-rank) and cprt false-converges across ranks, so they use
-            // the proven parallel iterative path (block-ILU0). An explicit
-            // --adjoint-linear-solver bypasses this (config_.linearSolver != "auto").
+            // (single-rank); they use cprt on the consistent parallel
+            // transpose (buildConsistentParallelTranspose), which reproduces the
+            // serial cprt path across ranks. An explicit --adjoint-linear-solver
+            // bypasses this (config_.linearSolver != "auto").
             constexpr std::size_t directSolverMaxCells = 2000;
             const std::size_t nCells = simulator_.model().numGridDof();
             if (parallel_.parallel()) {
-                linearSolver = "ilu0";
+                linearSolver = "cprt";
             } else {
                 linearSolver = (nCells <= directSolverMaxCells) ? "umfpack"
                                                                 : "cprt";
@@ -150,9 +152,9 @@ public:
                 linearSolver, nCells));
         }
         // umfpack is single-rank; fall back to the iterative parallel path
-        // (block-ILU0) if it was requested explicitly on >1 rank.
+        // (cprt on the consistent transpose) if requested explicitly on >1 rank.
         if (parallel_.parallel() && linearSolver == "umfpack") {
-            linearSolver = "ilu0";
+            linearSolver = "cprt";
         }
         linearSolver_.configure(linearSolver,
                                 config_.linearSolverReduction,
@@ -298,12 +300,18 @@ public:
 
             t0 = tick();
             computeWellAdjoints_(k, step.dt, lambda);
+            auto tg1 = tick();
             if (generalGradients_) {
                 accumulateGeneralGradients_(step.dt, lambda, generalAd_);
             } else {
                 accumulateGradients_(step.dt, lambda);
             }
+            auto tg2 = tick();
             accumulatePermWellTerm_(lambda);
+            auto tg3 = tick();
+            gradWellAdjSeconds_ += secs(t0, tg1);
+            gradFamiliesSeconds_ += secs(tg1, tg2);
+            gradPermWellSeconds_ += secs(tg2, tg3);
             timing_.gradients += secs(t0, tick());
             t0 = tick();
             accumulateEndpointGradients_(step.dt, lambda);
@@ -352,6 +360,15 @@ private:
         double endpoints = 0.0;  //!< end-point FD (0 unless --adjoint-endpoints)
         double total = 0.0;      //!< whole sweep
     };
+
+    // WS5 per-family gradient-accumulation timers (general/general-ad path).
+    double famPvSeconds_ = 0.0;
+    double famTransSeconds_ = 0.0;
+    double famPermSeconds_ = 0.0;
+    // WS5 split of the "gradients" bucket into its three calls.
+    double gradWellAdjSeconds_ = 0.0;   //!< computeWellAdjoints_
+    double gradFamiliesSeconds_ = 0.0;  //!< PV/TRANS/PERM accumulation
+    double gradPermWellSeconds_ = 0.0;  //!< accumulatePermWellTerm_
 
     //! \brief The Schur step (addWellContributions) writes C^T D^-1 B
     //!        into the reservoir matrix, which couples every pair of cells
@@ -405,6 +422,22 @@ private:
             timing_.gradients, pct(timing_.gradients),
             timing_.endpoints, pct(timing_.endpoints),
             timing_.total - accounted, pct(timing_.total - accounted)));
+        if (timing_.gradients > 0.0) {
+            OpmLog::info(fmt::format(
+                "  gradients breakdown: wellAdjoints {:.3f}s ({:.0f}%)  "
+                "families(pv/trans/perm) {:.3f}s ({:.0f}%)  permWellTerm {:.3f}s ({:.0f}%)",
+                gradWellAdjSeconds_, pct(gradWellAdjSeconds_),
+                gradFamiliesSeconds_, pct(gradFamiliesSeconds_),
+                gradPermWellSeconds_, pct(gradPermWellSeconds_)));
+            OpmLog::info(fmt::format(
+                "  families detail: pv {:.3f}s  trans {:.3f}s  perm {:.3f}s",
+                famPvSeconds_, famTransSeconds_, famPermSeconds_));
+        }
+        OpmLog::info(fmt::format(
+            "  replay detail: loadSnapshot {:.3f}s ({:.0f}%) over {} loads "
+            "[WS6a: 2 loads/substep after dropping the dead Phase-A load]",
+            replay_.loadSnapshotSeconds(), pct(replay_.loadSnapshotSeconds()),
+            replay_.loadSnapshotCalls()));
     }
 
     //! \brief dJ_k/dx_w of the objective for one StandardWell
@@ -745,9 +778,20 @@ private:
     void accumulateGeneralGradients_(double dt, const Vector& lambda,
                                      bool useAd)
     {
+        // WS5 instrumentation: gradient accumulation is objective-independent
+        // and (with the WS1/WS3 fast solve) dominates the sweep, so split it
+        // per family to see which is worth skipping / speeding up.
+        using Clk = std::chrono::steady_clock;
+        auto t0 = Clk::now();
         accumulatePvGeneral_(dt, lambda, useAd);
+        auto t1 = Clk::now();
         accumulateTransGeneral_(dt, lambda, useAd);
+        auto t2 = Clk::now();
         accumulatePermGeneral_(dt, lambda, useAd);
+        auto t3 = Clk::now();
+        famPvSeconds_ += std::chrono::duration<double>(t1 - t0).count();
+        famTransSeconds_ += std::chrono::duration<double>(t2 - t1).count();
+        famPermSeconds_ += std::chrono::duration<double>(t3 - t2).count();
     }
 
     //! \brief A seeded one-derivative scale (value 1, d/dθ = 1).
@@ -1227,27 +1271,160 @@ private:
         return perforated;
     }
 
-    //! \brief Well-coupling permeability gradient (dCTF/dperm).
+    //! \brief Chain a dC/d(lnCTF) at one perforation into the per-cell
+    //!        permeability well-term gradient via the dominant Peaceman factor
+    //!        Kh = sqrt(K_a K_b) h, so d(lnCTF)/dK_a = 1/(2 K_a) for the two
+    //!        directions perpendicular to the connection.
+    template<class TransT>
+    void applyPermWellChain_(const Connection& conn, int cell,
+                             const TransT& trans, Scalar dCdlnCtf)
+    {
+        int a, b;
+        switch (conn.dir()) {
+        case Connection::Direction::X: a = 1; b = 2; break;
+        case Connection::Direction::Y: a = 0; b = 2; break;
+        default:                       a = 0; b = 1; break;  // Z
+        }
+        const Scalar ka = trans.permeability(cell)[a][a];
+        const Scalar kb = trans.permeability(cell)[b][b];
+        if (ka > 0.0) {
+            gradientPermWell_[cell][a] += dCdlnCtf / (2.0 * ka);
+        }
+        if (kb > 0.0) {
+            gradientPermWell_[cell][b] += dCdlnCtf / (2.0 * kb);
+        }
+    }
+
+    //! \brief Well-coupling permeability gradient (dCTF/dperm) — dispatcher.
     //!
     //! At a defaulted-CTF perforation the connection transmissibility factor is
     //! perm-derived (Peaceman), so dJ/dperm has a term through the well
-    //! equations that the cell-based (reservoir face) perm gradient omits.
-    //! Measured on SPE1 to be ~95 % of dJ/dK at the producer perforation.
+    //! equations that the cell-based (reservoir face) perm gradient omits
+    //! (measured ~95 % of dJ/dK at the SPE1 producer perforation).
     //!
-    //! Mechanism: the CTF enters the reservoir source and the well residual
-    //! linearly (Tw = CTF*trans_mult, cq = -Tw*mob*drawdown). Perturbing the
-    //! well index (= CTF) and re-linearizing, the whole-domain contraction
-    //! lambda_r.R_r + lambda_w.R_w captures BOTH sides; central-differencing it
-    //! gives dC/d(ln CTF) = dJ/d(ln CTF). The chain to perm uses the dominant
-    //! Peaceman term Kh = sqrt(K_a K_b) h, so d(ln CTF)/dK_a = 1/(2 K_a) for the
-    //! two directions perpendicular to the connection (the weaker r0 dependence
-    //! is neglected in this v1). Explicit-CTF connections have dCTF/dK = 0 and
-    //! are skipped.
+    //! The residual is LINEAR in the CTF (Tw = CTF*trans_mult, cq =
+    //! -Tw*mob*drawdown), and the well index is not a state variable, so
+    //! perturbing it changes no intensive quantity and no reservoir-reservoir
+    //! flux — only the perforation's flow cq. The default 'analytic' path uses
+    //! that: dC/d(lnCTF) is exactly the CTF-proportional part of the contraction,
+    //! which is the per-connection cq (connectionRates()). The former 'fd' path
+    //! central-differenced the WHOLE-DOMAIN contraction twice per perforation per
+    //! substep (~96 % of the SPE9 sweep); it is kept as the reference oracle.
+    //! OPM_ADJOINT_PERMWELL_METHOD selects: analytic (default) | fd | verify
+    //! (run both, warn on mismatch — the safeguard that a future well-model
+    //! change breaking CTF-linearity is detected).
     void accumulatePermWellTerm_(const Vector& lambda)
     {
         if (!config_.permWellTerm) {
             return;
         }
+        static const std::string method = [] {
+            const char* e = std::getenv("OPM_ADJOINT_PERMWELL_METHOD");
+            return std::string{e ? e : "analytic"};
+        }();
+        if (method == "fd") {
+            accumulatePermWellTermFd_(lambda);
+        } else if (method == "verify") {
+            accumulatePermWellTermVerify_(lambda);
+        } else {
+            accumulatePermWellTermAnalytic_(lambda);
+        }
+    }
+
+    //! \brief Analytic dCTF/dperm well term (default, cheap): dC/d(lnCTF) at a
+    //!        perforation is the CTF-proportional part of lambda_r.R_r +
+    //!        lambda_w.R_w. The connection flow cq (= connectionRates()) enters
+    //!        the well residual as +cq (assemblePerforationEq) and the perforated
+    //!        cell's reservoir residual with the opposite sign, so
+    //!        dC/d(lnCTF) = sum_comp cq[comp] * (lambda_w[comp] - lambda_r[cell][comp]).
+    //!        No perturbation, no re-linearization.
+    void accumulatePermWellTermAnalytic_(const Vector& lambda)
+    {
+        const auto& trans = simulator_.problem().eclTransmissibilities();
+        const auto& wellModel = simulator_.problem().wellModel();
+        for (const auto& wellPtr : wellModel.localNonshutWells()) {
+            const auto* stdWell =
+                dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
+            if (!stdWell) {
+                continue;
+            }
+            const auto lwIt = lambdaWells_.find(stdWell->name());
+            if (lwIt == lambdaWells_.end()) {
+                continue;
+            }
+            const auto& lw = lwIt->second;             // well adjoint (numWellEq)
+            const auto& cqRates = stdWell->connectionRates();
+            const auto& perfData = stdWell->perforationData();
+            const auto& conns = stdWell->wellEcl().getConnections();
+            const auto& cells = stdWell->cells();
+            const auto& wellIndex = stdWell->wellIndex();
+
+            for (std::size_t perf = 0; perf < wellIndex.size(); ++perf) {
+                const int cell = cells[perf];
+                if (!parallel_.interior(cell)) {
+                    continue;
+                }
+                const auto& conn = conns[perfData[perf].ecl_index];
+                if (conn.kind() != Connection::CTFKind::Defaulted) {
+                    continue;  // explicit CTF: dCTF/dK = 0
+                }
+                if (!(wellIndex[perf] > 0.0)) {
+                    continue;
+                }
+                const auto& cq = cqRates[perf];  // RateVector (numEq components)
+                Scalar dCdlnCtf = 0.0;
+                for (int comp = 0; comp < numEq; ++comp) {
+                    const Scalar lwComp =
+                        (comp < static_cast<int>(lw.size())) ? lw[comp] : Scalar{0};
+                    const Scalar cqComp = getValue(cq[comp]);
+                    dCdlnCtf += cqComp * (lwComp - lambda[cell][comp]);
+                }
+                applyPermWellChain_(conn, cell, trans, dCdlnCtf);
+            }
+        }
+    }
+
+    //! \brief Safeguard: run BOTH the analytic and the finite-difference
+    //!        (whole-domain) perm-well term, warn if their per-cell gradients
+    //!        disagree beyond tolerance, and keep the analytic result. A
+    //!        divergence means the residual is no longer linear in the CTF (a
+    //!        future well-model change) or the analytic sign/mapping is stale.
+    void accumulatePermWellTermVerify_(const Vector& lambda)
+    {
+        const auto saved = gradientPermWell_;
+        accumulatePermWellTermAnalytic_(lambda);
+        auto analytic = gradientPermWell_;             // saved + analytic delta
+        gradientPermWell_ = saved;
+        accumulatePermWellTermFd_(lambda);             // saved + fd delta
+        Scalar worst = 0.0, scale = 0.0;
+        for (std::size_t c = 0; c < analytic.size(); ++c) {
+            for (int d = 0; d < 3; ++d) {
+                worst = std::max<Scalar>(worst,
+                    std::abs(analytic[c][d] - gradientPermWell_[c][d]));
+                scale = std::max<Scalar>(scale, std::abs(gradientPermWell_[c][d]));
+            }
+        }
+        const Scalar rel = worst / (scale > 0.0 ? scale : Scalar{1});
+        if (rel > 1e-6) {
+            OpmLog::warning(fmt::format(
+                "Adjoint perm-well-term VERIFY: analytic vs FD disagree "
+                "(max abs {:.3e}, field-normalized {:.3e}) — the residual may no "
+                "longer be linear in the connection transmissibility factor.",
+                worst, rel));
+        } else {
+            OpmLog::info(fmt::format(
+                "Adjoint perm-well-term VERIFY: analytic == FD "
+                "(field-normalized {:.3e}); CTF-linearity holds.", rel));
+        }
+        gradientPermWell_ = analytic;  // ship the analytic result
+    }
+
+    //! \brief Finite-difference reference for the dCTF/dperm well term (the
+    //!        proven oracle; see accumulatePermWellTerm_). Central-differences
+    //!        the whole-domain contraction per perforation — correct but ~96 %
+    //!        of the sweep, so used only via OPM_ADJOINT_PERMWELL_METHOD=fd/verify.
+    void accumulatePermWellTermFd_(const Vector& lambda)
+    {
         const auto& trans = simulator_.problem().eclTransmissibilities();
         auto& wellModel = simulator_.problem().wellModel();
         const Scalar h = config_.fdStep;

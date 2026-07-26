@@ -10,8 +10,12 @@ pattern), built against a near-stock `opm-simulators`.
 1. `adjoint_paths_summary.md` — decision basis for the current **practical field-HM
    phase**; §4 is the plan shape. Newest strategic doc.
 2. `STATUS.md` — status + build/run quickstart + objective/derivative tables.
-3. `adjoint_code_assessment.md` — fresh code review (findings F1–F7, perf P1–P3).
-4. Auto-memory `adjoint-project-state` — full decision/commit history.
+3. `adjoint_code_guide.md` — **code-reading guide + current-design summary**: reading
+   order through the source, the backward-sweep data flow, the three gradient
+   mechanisms, and the opm-simulators hook list. Start here to understand *how the code
+   is structured*.
+4. `adjoint_code_assessment.md` — fresh code review (findings F1–F7, perf P1–P3).
+5. Auto-memory `adjoint-project-state` — full decision/commit history.
 
 Background (read on demand): `adjoint_plan.md` (design + PR sequencing),
 `adjoint_status.md` (feature catalog + explicitly-updated-quantities table),
@@ -81,8 +85,28 @@ ctest -R adjoint_fd   # just the FD-vs-adjoint gradient checks
   replay runs truncate summary files in their output dir at startup.
 - **Multi-perf wells** need `--matrix-add-well-contributions=true` (now injected by default
   in `flow_adjoint main()`, with `--linear-solver=ilu0`).
-- **Solver choice:** serial fastest = `cprt`; parallel = `cpr`/`ilu0` (cprt falsely
-  converges in parallel); umfpack single-rank. Default reduction `1e-14`.
+- **Solver choice:** serial fastest = `cprt`; parallel auto-selects `cprt` too and now
+  matches serial convergence (SPE9: 9.4 iters/solve at np2 and np4, vs serial 9.5). Parallel
+  builds the exact consistent transpose `M=Aᵀ` (`buildConsistentParallelTranspose`, verified
+  to machine precision; `OPM_ADJOINT_VERIFY_TRANSPOSE=1`), wraps it in
+  `GhostLastMatrixAdapter`, and runs opm's parallel `cprt`. **Key fix:** `cprt`'s coarse
+  assembly (`PressureTransferPolicy` transpose branch) indexes weights by *column*, which for
+  an owned row's ghost columns needs the ghost's OWNER weights — so the weights vector is made
+  owner-consistent with `copyOwnerToAll` in the parallel weights lambda before the CPR builds
+  its coarse matrix. Without that, ghost weights (from M's identity-invalidated ghost rows)
+  are wrong → cross-rank-inconsistent coarse operator → BiCGSTAB false-converges (the real
+  cause of the old "cprt falsely converges in parallel"; it was a missing communication, not
+  an inherent limit). umfpack single-rank; parallel auto-selects `cprt`. Default reduction
+  `1e-14`. Coarse solver amg≈hypre at ≤44k (both correct). Massive improvement over the old
+  block-ILU0 fallback (204 iters, diverged at np≥4). **Parallel works on NNC/fault decks
+  (Norne) too:** the matrix sparsity includes every grid neighbour but the parallel overlap
+  omits zero-transmissibility NNCs, so a few cross-rank couplings are structurally present
+  with an off-rank partner — their blocks are exactly zero, so `buildConsistentParallelTranspose`
+  drops them (verified `|block|=0`; transpose matches the oracle to ~8e-17 on Norne). A
+  *nonzero* unplaceable coupling (diffusion/thermal on a below-trans NNC) throws rather than
+  being silently dropped. (Norne fixed-step forward needs loose tolerances +
+  `--newton-max-iterations`>20; serial-vs-parallel end-to-end then differs ~2e-4 from the
+  forward trajectory, not the adjoint.)
 - **Test scripts are bash, not zsh** — the one-liners rely on word-splitting; run with
   `bash`. macOS `/bin/bash` is 3.2 (no `${VAR^^}`); no `timeout` (use `gtimeout`).
 - v1 forces `--enable-storage-cache=false` (residual = pure `R(x_k, x_{k-1})`).

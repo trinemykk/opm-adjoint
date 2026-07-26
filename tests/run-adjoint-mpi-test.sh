@@ -9,9 +9,11 @@
 # of the cell ordering (which differs between the serial grid and the
 # partitioned one).
 #
-# Parallel runs use --adjoint-linear-solver=cpr: cprt (transpose-CPR)
-# falsely converges in parallel and is rejected at runtime; cpr and ilu0
-# are correct (verified to ~5e-6 vs serial on SPE1).
+# Parallel runs use --adjoint-linear-solver=cprt: the transposed CPR now
+# runs on the exact consistent parallel transpose M=A^T
+# (buildConsistentParallelTranspose), so it converges correctly across
+# ranks (the earlier "cprt false-converges in parallel" was the incomplete
+# local transpose). cpr/ilu0 remain valid alternatives.
 #
 # Usage:
 #   run-adjoint-mpi-test.sh <flow_adjoint> <deck.DATA> <output-dir> [nprocs] [rel-tol]
@@ -63,7 +65,7 @@ mkdir -p "${OUTDIR}"
 echo "=== serial (np=1) record + gradient ==="
 run 1 serial --adjoint-save=true --threads-per-process=1 \
     || { echo "serial forward FAILED"; tail -5 "${OUTDIR}/serial/run.log"; exit 1; }
-run 1 serial --adjoint-mode=gradient --adjoint-linear-solver=cpr \
+run 1 serial --adjoint-mode=gradient --adjoint-linear-solver=cprt \
     --threads-per-process=1 \
     || { echo "serial gradient FAILED"; tail -5 "${OUTDIR}/serial/run.log"; exit 1; }
 cp "${OUTDIR}/serial/${DECKNAME}.ADJOINT_GRADIENTS_PV.txt" "${OUTDIR}/pv_serial.txt"
@@ -71,7 +73,7 @@ cp "${OUTDIR}/serial/${DECKNAME}.ADJOINT_GRADIENTS_PV.txt" "${OUTDIR}/pv_serial.
 echo "=== parallel (np=${NP}) record + gradient ==="
 run "${NP}" parallel --adjoint-save=true \
     || { echo "parallel forward FAILED"; tail -8 "${OUTDIR}/parallel/run.log"; exit 1; }
-run "${NP}" parallel --adjoint-mode=gradient --adjoint-linear-solver=cpr \
+run "${NP}" parallel --adjoint-mode=gradient --adjoint-linear-solver=cprt \
     || { echo "parallel gradient FAILED"; tail -8 "${OUTDIR}/parallel/run.log"; exit 1; }
 cp "${OUTDIR}/parallel/${DECKNAME}.ADJOINT_GRADIENTS_PV.txt" "${OUTDIR}/pv_parallel.txt"
 

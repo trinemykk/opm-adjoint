@@ -54,16 +54,29 @@ done
 for solver in ${SOLVERS}; do
     [ -f "${OUTDIR}/PV_${solver}.txt" ] || continue
     for kind in PV TRANS; do
-        result=$(python3 - "${OUTDIR}/${kind}_umfpack.txt" \
+        result=$(METRIC="${METRIC:-entrywise}" python3 - \
+                           "${OUTDIR}/${kind}_umfpack.txt" \
                            "${OUTDIR}/${kind}_${solver}.txt" "${RELTOL}" << 'EOF'
-import sys
+import os, sys
 ref, test, tol = sys.argv[1], sys.argv[2], float(sys.argv[3])
+metric = os.environ.get("METRIC", "entrywise")
 def load(p):
     return [[float(v) for v in l.split()] for l in open(p)
             if not l.startswith('#')]
 a, b = load(ref), load(test)
-worst = max((abs(x - y) / max(abs(x), abs(y), 1e-30)
-             for ra, rb in zip(a, b) for x, y in zip(ra, rb)), default=0.0)
+if metric == "field":
+    # Field-normalized: normalize the difference by the largest reference
+    # gradient magnitude over the whole vector, not per entry. On large decks
+    # (SPE9: 9000 cells) many gradient entries are ~0, where an entry-wise
+    # relative diff is dominated by rounding noise; the field-normalized metric
+    # is the accuracy measure the sizing note used (cprt ~1.9e-9 vs umfpack).
+    scale = max((abs(x) for ra in a for x in ra), default=0.0) or 1e-30
+    worst = max((abs(x - y)
+                 for ra, rb in zip(a, b) for x, y in zip(ra, rb)),
+                default=0.0) / scale
+else:
+    worst = max((abs(x - y) / max(abs(x), abs(y), 1e-30)
+                 for ra, rb in zip(a, b) for x, y in zip(ra, rb)), default=0.0)
 print(f"{worst:.3e}")
 sys.exit(0 if worst <= tol and len(a) == len(b) else 1)
 EOF

@@ -103,25 +103,40 @@ CLI overrides JSON). The JSON `mode` is now honoured by the run-mode dispatch
 
 ### Memory & performance (measured — see `adjoint_storage_sizing.md`)
 
-The constraint that decides adjoint model size is the **backward linear solver's
-memory, not storage**. Measured max RSS:
+**Memory — the constraint that decides adjoint model size is the backward linear
+solver, not storage.** Measured max RSS:
 
 | | forward | backward umfpack | backward cprt |
 |---|---:|---:|---:|
 | SPE9 (9 k cells) | 156 MiB | **4103 MiB (26×)** | **356 MiB (2.3×)** |
 | **Norne (44 k cells)** | 699 MiB | ~40 GB → **OOM** (extrap.) | **778 MiB (1.1×)** |
 
-umfpack's LU fill scales super-linearly → fatal at field scale; **cprt/ilu0 keep the
-adjoint at ~forward memory**, so with an iterative backward solver the adjoint runs the
-**same model sizes as the forward** (the full 44 k-cell Norne adjoint peaks at 1.1×
-forward). Recording adds ~0 RAM; at Norne scale it adds ~45 s of *time* (writing a
-4.5 GB full tape — slim ≈ ⅓). Backward wall-clock split is objective-dependent
-(SPE9/matchref: gradient accumulation 74 %; Norne/pressure-average: transposed solve
-53 %). New timing output: the recorder now logs `Adjoint recording timing` and the
-sweep logs `Adjoint sweep timing` — both land at the end of the `.DBG`/`.PRT`.
-Recommendation: umfpack only as the small-case oracle; field runs default to
-`--adjoint-linear-solver=cprt` (or the hypre-coarse CPR config
-`tests/adjoint-cprt-hypre.json` once opm-simulators is built with `HAVE_HYPRE`).
+umfpack's LU fill scales super-linearly → fatal at field scale; **cprt keeps the adjoint
+at ~forward memory**. The backward solver now **defaults to `auto`** (umfpack ≤ 2000
+cells as the exact small-case oracle, cprt above) — so field runs get cprt without a
+flag. (Gated by `adjoint_solver_spe9`: cprt vs umfpack agree to <1e-7 field-normalized.)
+
+**Wall-clock — rebuilt 2026-07-25; the old "≈3× forward, gradient-74%" story is
+obsolete.** A chain of fixes made the backward sweep ~forward-cost and linearly scaling:
+
+- **Analytic dCTF/dperm well term** (was the dominant cost — 2 whole-domain
+  re-linearizations per perforation per substep = 96 % of the SPE9 sweep; now an exact
+  O(perforations) analytic contraction, `Σ cq·(λ_w−λ_r)`, guarded by
+  `OPM_ADJOINT_PERMWELL_METHOD=verify`). **SPE9 sweep 24 s → 1 s.**
+- **cprt preconditioner reuse** across the sweep (build the FlexibleSolver once, then
+  `preconditioner().update()`; Norne AMG setup 1.16 s → 0.39 s). Escape hatch
+  `OPM_ADJOINT_REBUILD_PRECOND=1`.
+- **WS6a**: dropped a dead per-substep snapshot load (3 → 2 loads/substep).
+
+**Norne (44 k cells, 24 substeps): backward sweep 8.9 s vs forward 14.3 s = 0.62×
+forward.** Split: transposed solve 52 %, replay (re-linearize) 28 %, gradient families
+20 % (objective-independent), perm-well-term ~0. Was ~71 s before these fixes (the
+inert-umfpack default). All three surviving components are ~O(cells×substeps), so the
+sweep **scales linearly** — one gradient now costs ≈ forward + 0.6×forward sweep +
+recording (well under 2× forward). At 0.1–1 M cells the binding constraint is no longer
+compute but **tape I/O / disk** (230 B/cell/substep → tens–hundreds of GB; stream to
+disk). Timing detail prints to the `.DBG`/`.PRT` (`Adjoint sweep timing`, the gradients
+breakdown, and `Adjoint recording timing`).
 
 **Two correctness rules to keep straight** (2026-07-24):
 
