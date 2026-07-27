@@ -47,6 +47,7 @@
 #include <opm/adjoint/AdjointDeckWarnings.hpp>
 #include <opm/adjoint/AdjointSystemIO.hpp>
 #include <opm/adjoint/AdjointResidualEvaluator.hpp>
+#include <opm/simulators/flow/FlowProblemParameters.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -99,6 +100,21 @@ public:
                       "run with --enable-storage-cache=false (and record the "
                       "forward run with the same option).");
         }
+        if (Parameters::Get<Parameters::EnableDriftCompensation>()) {
+            // See the matching warning in AdjointRecorder::checkConfiguration_.
+            // Drift compensation feeds an accumulated correction into the
+            // residual, which the adjoint recursion does not model, so the
+            // sweep would return quietly wrong gradients. Refuse rather than
+            // approximate. Deliberately not gated on
+            // EnableDriftCompensationTemp: its true default only takes effect
+            // for the sequential-thermal energy module.
+            OPM_THROW(std::runtime_error,
+                      "Adjoint replay does not support drift compensation: the "
+                      "accumulated residual correction is not part of the "
+                      "adjoint recursion, so the gradients would be wrong. "
+                      "Re-run the forward simulation and the sweep with "
+                      "--enable-drift-compensation=false.");
+        }
 
         std::string path = "(in-memory, one-stop)";
         if (injectedArchive) {
@@ -121,6 +137,20 @@ public:
                       "Adjoint archive schema version " +
                       std::to_string(meta_.schemaVersion) + " does not match " +
                       std::to_string(AdjointMeta::currentSchemaVersion));
+        }
+        if (!meta_.allPayloadsPresent()) {
+            // Recorded with --adjoint-checkpoint-every>1: the substeps between
+            // checkpoints must be recomputed and supplied via
+            // setSegmentArchive(). sourceArchive_() throws precisely where one
+            // is missing, so this only has to say what the archive is.
+            OpmLog::info(fmt::format(
+                "Adjoint archive is checkpointed (stride {}): {} of {} substeps "
+                "carry no stored state and are recomputed during the sweep.",
+                meta_.checkpointEvery,
+                std::count_if(meta_.substeps.begin(), meta_.substeps.end(),
+                              [](const AdjointSubstepMeta& m)
+                              { return !m.hasPayload; }),
+                meta_.substeps.size()));
         }
         if (meta_.storageCacheEnabled) {
             OpmLog::warning("The forward run was recorded with the storage "
@@ -281,6 +311,16 @@ public:
     void setComputeBdiag(bool enable)
     { computeBdiagEnabled_ = enable; }
 
+    //! \brief Point the reader at the archive holding a recomputed segment.
+    //!
+    //! Substeps whose `hasPayload` is false are read from here instead of the
+    //! recorded archive; pass nullptr when the segment is retired. Only the
+    //! non-checkpoint substeps are affected, so a wrong or stale segment
+    //! archive surfaces as a missing dataset rather than as silently wrong
+    //! state.
+    void setSegmentArchive(std::shared_ptr<AdjointArchive> archive)
+    { segmentArchive_ = std::move(archive); }
+
     //! \brief Cross-term blocks dR_k/dx_{k-1} of the last replayed substep.
     const std::vector<BdiagBlock>& bdiag() const
     { return bdiag_; }
@@ -309,26 +349,65 @@ private:
     auto& wellModel_()
     { return simulator_.problem().wellModel(); }
 
+    //! \brief Which archive holds substep \p k's payload.
+    //!
+    //! Checkpoints (and the initial state) live in the recorded archive; the
+    //! substeps in between were never written and come from the segment archive
+    //! the driver just filled by recomputing them. `hasPayload` in the recorded
+    //! meta is the authority, so there is no ambiguity and nothing to copy
+    //! between archives.
+    AdjointArchive& sourceArchive_(int k)
+    {
+        const bool stored = (k < 0) || meta_.substeps[k].hasPayload;
+        if (stored) {
+            return *archive_;
+        }
+        if (!segmentArchive_) {
+            OPM_THROW(std::runtime_error, fmt::format(
+                      "Substep {} has no stored state (the archive was recorded "
+                      "with --adjoint-checkpoint-every={}) and no recomputed "
+                      "segment is available. Either re-record with "
+                      "--adjoint-checkpoint-every=1 or run a mode that drives "
+                      "the segment recompute.", k, meta_.checkpointEvery));
+        }
+        return *segmentArchive_;
+    }
+
     //! \brief Full restore of snapshot \p k (k == -1 means the initial state).
     void loadSnapshot_(int k, int reportStepForWells)
     {
         const auto t0 = std::chrono::steady_clock::now();
         ++loadSnapshotCalls_;
         wellModel_().prepareDeserialize(reportStepForWells);
+        // OPM_ADJOINT_WELLSTATE_DIAG=1 prints the reconstructed well state
+        // next to its recorded counterpart (AdjointRecorder prints the "REC"
+        // side). An archive read fails with a bare "size mismatch", so
+        // comparing the two per rank and substep is the way to localize a
+        // record/replay well-set divergence.
+        if (std::getenv("OPM_ADJOINT_WELLSTATE_DIAG")) {
+            const auto& wm = wellModel_();
+            std::cerr << fmt::format(
+                "[wellstate-diag] rank {} substep {} reportStep {}: "
+                "localWells={} wellStateSize={}\n",
+                simulator_.vanguard().grid().comm().rank(), k,
+                reportStepForWells, wm.numLocalWellsEnd(),
+                wm.wellState().size());
+        }
         const std::string group = (k < 0) ? AdjointGroups::initial()
                                           : AdjointGroups::substep(k);
+        AdjointArchive& src = sourceArchive_(k);
         if (meta_.slim) {
             // Symmetric with AdjointRecorder::writeSnapshot_: restore the
             // dynamic state; the schedule stays the deck-reconstructed one and
             // time/episode are set from meta by the caller (replayStep).
             auto& v = simulator_.vanguard();
-            archive_->read(simulator_.model(),   group, "model");
-            archive_->read(simulator_.problem(), group, "problem");
-            archive_->read(v.summaryState(),     group, "summary");
-            archive_->read(v.udqState(),         group, "udq");
-            archive_->read(v.actionState(),      group, "action");
+            src.read(simulator_.model(),   group, "model");
+            src.read(simulator_.problem(), group, "problem");
+            src.read(v.summaryState(),     group, "summary");
+            src.read(v.udqState(),         group, "udq");
+            src.read(v.actionState(),      group, "action");
         } else {
-            archive_->read(simulator_, group, "simulator");
+            src.read(simulator_, group, "simulator");
         }
         model_().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
         loadSnapshotSeconds_ += std::chrono::duration<double>(
@@ -455,7 +534,10 @@ private:
         const auto& meta = meta_.substeps[k];
         auto liveResidual = AdjointVectorDump::from(model_().linearizer().residual());
 
-        if (!meta_.systemSaved) {
+        // The residual/Jacobian dumps ride along with the state payload, so a
+        // recomputed substep has none to compare against - report its residual
+        // norm instead, exactly as an archive recorded without systems does.
+        if (!meta_.systemSaved || !meta_.substeps[k].hasPayload) {
             double norm = 0.0;
             for (const double value : liveResidual.values) {
                 norm = std::max(norm, std::abs(value));
@@ -504,6 +586,9 @@ private:
     Simulator& simulator_;
     AdjointConfig config_;
     std::shared_ptr<AdjointArchive> archive_;
+    //! Holds the recomputed states of the segment currently being swept; only
+    //! consulted for substeps the recording skipped.
+    std::shared_ptr<AdjointArchive> segmentArchive_;
     AdjointMeta meta_;
     bool computeBdiagEnabled_{false};
     std::vector<BdiagBlock> bdiag_;

@@ -42,8 +42,12 @@
 #include <opm/adjoint/AdjointWellModel.hpp>
 #include <opm/adjoint/AdjointStorage.hpp>
 #include <opm/adjoint/AdjointSystemIO.hpp>
+#include <opm/simulators/flow/FlowProblemParameters.hpp>
+#include <opm/simulators/flow/SimulatorFullyImplicit.hpp>
+#include <opm/simulators/timestepping/EclTimeSteppingParams.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <sstream>
@@ -62,12 +66,25 @@ public:
         : AdjointRecorder(simulator, nullptr)
     {}
 
-    //! \brief One-stop recorder: records into a shared (in-memory) archive so
-    //!        the backward sweep in the same process reads the states directly.
+    //! \brief One-stop / segment recorder: records into a shared (in-memory)
+    //!        archive so the backward sweep in the same process reads the
+    //!        states directly.
+    //! \param globalIndexOffset Global index of this recorder's first substep.
+    //!        Non-zero for a segment recompute, whose local substep j is the
+    //!        run's global substep offset+j — the sweep asks for groups by
+    //!        global index, so the groups must be numbered that way.
+    //! \param segmentMode Recording a recomputed stretch rather than the
+    //!        forward run: every substep gets a payload (the sweep needs both k
+    //!        and k-1, so a segment must be fully materialized) and the
+    //!        configuration warnings are left to the original forward run.
     AdjointRecorder(Simulator& simulator,
-                    std::shared_ptr<AdjointArchive> injectedArchive)
+                    std::shared_ptr<AdjointArchive> injectedArchive,
+                    int globalIndexOffset = 0,
+                    bool segmentMode = false)
         : simulator_(simulator)
         , config_(AdjointConfig::fromParameters())
+        , globalIndexOffset_(globalIndexOffset)
+        , segmentMode_(segmentMode)
     {
         std::string path;
         if (injectedArchive) {
@@ -88,7 +105,15 @@ public:
         meta_.systemSaved = config_.saveSystem;
         meta_.storageCacheEnabled = Parameters::Get<Parameters::EnableStorageCache>();
         meta_.slim = config_.slim;
+        meta_.checkpointEvery = std::max(1, config_.checkpointEvery);
         meta_.caseName = simulator_.vanguard().caseName();
+
+        if (segmentMode_) {
+            // A segment stores every substep it recomputes, whatever stride the
+            // original recording used.
+            meta_.checkpointEvery = 1;
+            return;   // no guards, no banner: this is not a fresh forward run
+        }
 
         checkConfiguration_();
         const char* backend = archive_->inMemory() ? "" :
@@ -146,20 +171,40 @@ public:
                        int substepInReport,
                        const SimulatorReportSingle& report)
     {
-        const int k = static_cast<int>(meta_.substeps.size());
+        const int k = globalIndexOffset_ + static_cast<int>(meta_.substeps.size());
         const std::string group = AdjointGroups::substep(k);
 
         const auto t0 = Clock::now();
-        writeSnapshot_(group);
-        if (!config_.slim) {
-            // Retained for the full (proven) format; the well/group state is
-            // already inside the problem snapshot, so slim omits this.
-            auto& wellModel = simulator_.problem().wellModel();
-            archive_->write(wellModel, group, "wgstate");
+        // Recording side of OPM_ADJOINT_WELLSTATE_DIAG; see the matching
+        // print in AdjointReplay::loadSnapshot_. Note that numLocalWellsEnd()
+        // counts this rank's wells at the END of the schedule, so it stays
+        // constant - wellStateSize() is the one that tracks the current step.
+        if (std::getenv("OPM_ADJOINT_WELLSTATE_DIAG")) {
+            const auto& wm = simulator_.problem().wellModel();
+            std::cerr << fmt::format(
+                "[wellstate-diag REC] rank {} substep {} episode {}: "
+                "localWells={} wellStateSize={}\n",
+                simulator_.vanguard().grid().comm().rank(), k,
+                simulator_.episodeIndex(), wm.numLocalWellsEnd(),
+                wm.wellState().size());
         }
+        // Under checkpointing only every M-th substep carries a payload; the
+        // rest are recomputed forward from the preceding checkpoint during the
+        // sweep. The meta list below stays DENSE either way — the sweep needs
+        // dt/reportStep for every substep, and it costs a few bytes.
+        const bool checkpoint = isCheckpoint_(k);
+        if (checkpoint) {
+            writeSnapshot_(group);
+            if (!config_.slim) {
+                // Retained for the full (proven) format; the well/group state is
+                // already inside the problem snapshot, so slim omits this.
+                auto& wellModel = simulator_.problem().wellModel();
+                archive_->write(wellModel, group, "wgstate");
+            }
 
-        if (config_.saveSystem) {
-            recordSystem_(group);
+            if (config_.saveSystem) {
+                recordSystem_(group);
+            }
         }
         recordSeconds_ += secs_(t0);
 
@@ -170,6 +215,7 @@ public:
         meta.startTime = startTime;
         meta.dt = dt;
         meta.newtonIterations = report.total_newton_iterations;
+        meta.hasPayload = checkpoint;
         meta_.substeps.push_back(meta);
     }
 
@@ -177,6 +223,13 @@ public:
     void finalize()
     {
         archive_->write(meta_, AdjointGroups::meta(), "meta");
+
+        if (segmentMode_) {
+            // One segment out of many: the provenance text belongs to the
+            // forward run's archive, and per-segment log lines would drown the
+            // sweep output. The sweep reads state by global index, not meta.
+            return;
+        }
 
         std::ostringstream params;
         Parameters::printValues(params);
@@ -194,8 +247,20 @@ public:
             "({:.1f} ms/snapshot, {} archive)",
             n + 1, recordSeconds_,
             1000.0 * recordSeconds_ / std::max(1, n + 1), medium));
-        OpmLog::info("Adjoint recording finished: " +
-                     std::to_string(meta_.substeps.size()) + " substeps stored");
+        const int stored = static_cast<int>(
+            std::count_if(meta_.substeps.begin(), meta_.substeps.end(),
+                          [](const AdjointSubstepMeta& m) { return m.hasPayload; }));
+        if (meta_.checkpointEvery > 1) {
+            OpmLog::info(fmt::format(
+                "Adjoint recording finished: {} substeps, {} snapshots stored "
+                "(checkpoint stride {}); the remaining {} are recomputed in the "
+                "backward sweep",
+                meta_.substeps.size(), stored + 1, meta_.checkpointEvery,
+                static_cast<int>(meta_.substeps.size()) - stored));
+        } else {
+            OpmLog::info("Adjoint recording finished: " +
+                         std::to_string(meta_.substeps.size()) + " substeps stored");
+        }
     }
 
     int numRecordedSubsteps() const
@@ -212,6 +277,56 @@ private:
                             "currently assumes the cache-free storage term; run "
                             "the forward simulation with "
                             "--enable-storage-cache=false for exact replay.");
+        }
+        if (meta_.checkpointEvery > 1) {
+            // The substeps without a payload are reproduced by re-running the
+            // forward solve, so the recorded substep sequence has to be
+            // reproducible. Adaptive stepping breaks that twice over: it can
+            // pick different substeps on the recompute, and the tape does not
+            // carry the controller's internal state (suggestedNextStep and the
+            // PID error history live in SimulatorFullyImplicit, not Simulator).
+            // TUNING is the same story - its updater clears schedule events, so
+            // re-entering a report step silently skips the update.
+            // Refused here rather than at replay: the archive would be unusable.
+            if (Parameters::Get<Parameters::EnableAdaptiveTimeStepping>()) {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-checkpoint-every>1 requires fixed time "
+                          "stepping: the substeps between checkpoints are "
+                          "recomputed, which cannot reproduce an adaptively "
+                          "chosen substep sequence. Re-run with "
+                          "--enable-adaptive-time-stepping=false.");
+            }
+            if (Parameters::Get<Parameters::EnableTuning>()) {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-checkpoint-every>1 is not compatible with "
+                          "--enable-tuning=true: applying TUNING clears schedule "
+                          "events, so a recomputed report step would see a "
+                          "different configuration than the recorded one.");
+            }
+            OpmLog::info(fmt::format(
+                "Adjoint recording: checkpointing every {} substeps; the "
+                "substeps in between are recomputed during the backward sweep.",
+                meta_.checkpointEvery));
+        }
+        if (Parameters::Get<Parameters::EnableDriftCompensation>()) {
+            // Drift compensation adds an accumulated mass-balance correction to
+            // the residual (FlowProblemBlackoil::addToSourceDense), which makes
+            // R depend on the whole history rather than on (x_k, x_{k-1}) alone.
+            // The adjoint recursion has no term for that, so the gradients would
+            // be silently wrong. Warned here, refused in AdjointReplay - the same
+            // asymmetry as the storage cache above, so a forward run that also
+            // wants its ECL output still completes.
+            //
+            // Only the non-Temp flag matters: EnableDriftCompensationTemp
+            // defaults to true, but FlowProblem only reads it for the
+            // SequentialImplicitThermal energy module, so testing it here would
+            // refuse every default blackoil run.
+            OpmLog::warning("Adjoint recording: drift compensation is enabled "
+                            "(--enable-drift-compensation=true). Its accumulated "
+                            "residual correction is not part of the adjoint "
+                            "recursion, so the backward sweep will refuse this "
+                            "archive. Re-run with "
+                            "--enable-drift-compensation=false.");
         }
         if (simulator_.gridView().comm().size() > 1) {
             OpmLog::info("Adjoint recording: parallel run - the archive is "
@@ -240,6 +355,21 @@ private:
         archive_->write(jacobian, group + "/system", "jacobian");
     }
 
+    //! \brief Whether substep \p k carries a state payload.
+    //!
+    //! Checkpoints land at k = M-1, 2M-1, ..., so with c_0 = -1 (the always
+    //! written `initial` group) every segment (c_j, c_{j+1}] holds exactly M
+    //! substeps. M = 1 makes every substep a checkpoint, i.e. bit-for-bit the
+    //! pre-checkpointing behaviour.
+    bool isCheckpoint_(int k) const
+    {
+        if (segmentMode_) {
+            return true;   // a segment must be fully materialized
+        }
+        const int m = meta_.checkpointEvery;
+        return m <= 1 || ((k + 1) % m) == 0;
+    }
+
     using Clock = std::chrono::steady_clock;
     static double secs_(Clock::time_point t0)
     {
@@ -248,6 +378,8 @@ private:
 
     Simulator& simulator_;
     AdjointConfig config_;
+    int globalIndexOffset_ = 0;    //!< global index of this recorder's substep 0
+    bool segmentMode_ = false;     //!< recording a recomputed segment, not a run
     std::shared_ptr<AdjointArchive> archive_;
     AdjointMeta meta_;
     double recordSeconds_ = 0.0;   //!< wall time spent serializing + writing

@@ -56,6 +56,20 @@ struct AdjointSlim { static constexpr bool value = false; };
 //!        replay tests).
 struct AdjointSaveSystem { static constexpr bool value = false; };
 
+//! \brief Directory to write one backward substep's linear system to, in
+//!        MatrixMarket format ("" = off).
+//!
+//! Writes the reservoir block A and (for the coupled-system solver) the well
+//! blocks B, C, D, plus the right-hand side and the computed adjoint. The
+//! files are standard MatrixMarket at full double precision, so the system
+//! can be reloaded and experimented with outside the simulator - by
+//! tests/examples here, or by MATLAB/MRST, Julia and scipy.
+struct AdjointDumpSystem { static constexpr auto value = ""; };
+
+//! \brief Which backward substep --adjoint-dump-system writes (-1 = the
+//!        first one solved, i.e. the last substep of the forward run).
+struct AdjointDumpSystemStep { static constexpr int value = -1; };
+
 //! \brief Run mode of the simulator with respect to adjoint processing:
 //!        "" (normal forward run) or "replay" (backward replay of a
 //!        recorded forward run instead of the time loop).
@@ -67,8 +81,12 @@ struct AdjointMode { static constexpr auto value = ""; };
 struct AdjointFile { static constexpr auto value = ""; };
 
 //! \brief Linear solver for the transposed adjoint systems:
-//!        auto (default) | umfpack (direct) | ilu0 | cpr | cprt | <file>.json
-//!        (FlexibleSolver configuration).
+//!        auto (default) | umfpack (direct) | ilu0 | cpr | cprt |
+//!        system_cprt | <file>.json (FlexibleSolver configuration).
+//!        `system_cprt` keeps the wells IN the transposed system
+//!        [A^T B^T; C^T D^T] instead of folding them through the Schur
+//!        complement, so it runs *without*
+//!        --matrix-add-well-contributions (standard 3-phase blackoil only).
 //!        "auto" selects by problem size: umfpack (exact) for small cases —
 //!        the verification oracle — and cprt (transposed CPR, ~forward memory)
 //!        above a modest cell count, because umfpack's LU fill is super-linear
@@ -132,6 +150,13 @@ struct AdjointFdStep { static constexpr double value = 1e-7; };
 //!        a no-op for explicit-CTF decks.
 struct AdjointPermWellTerm { static constexpr bool value = true; };
 
+//! \brief Snapshot stride. 1 (default) stores every accepted substep, which is
+//!        what the backward sweep reads directly. M > 1 stores only every M-th,
+//!        and the substeps in between are recomputed forward from the preceding
+//!        checkpoint during the sweep — storage traded for forward compute.
+//!        Requires fixed time stepping (see AdjointRecorder's guards).
+struct AdjointCheckpointEvery { static constexpr int value = 1; };
+
 //! \brief How the end-point FD gradients evaluate the perturbed residual:
 //!        "whole" (full re-linearization per perturbation, the original
 //!        cell x Ncells method, default) or "stencil" (stencil-local
@@ -150,7 +175,10 @@ struct AdjointConfig
     bool save{false};         //!< record per-substep state
     std::string mode{};       //!< "" (forward) or "replay"
     bool saveSystem{false};   //!< also dump residual/Jacobian per substep
+    std::string dumpSystemDir{}; //!< MatrixMarket dump of one substep ("" = off)
+    int dumpSystemStep{-1};   //!< which substep to dump (-1 = first solved)
     bool slim{false};         //!< slim snapshots (skip serialized schedule)
+    int checkpointEvery{1};   //!< snapshot stride; >1 enables checkpoint/recompute
     std::string path{};       //!< archive path ("" = derive from case name)
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};

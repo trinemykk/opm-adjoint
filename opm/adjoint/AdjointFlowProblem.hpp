@@ -81,6 +81,67 @@ public:
         return archive;
     }
 
+    //! \brief Install a recorder for a recomputed segment, at sweep time.
+    //!
+    //! Needed because the beginEpisode() logic below is a ONE-SHOT:
+    //! recorderInitialized_ latches on the first call, and in gradient/replay
+    //! mode that call declines a recorder (AdjointMode is non-empty), for good
+    //! reason — the sweep must not overwrite the archive it is reading. But a
+    //! checkpoint recompute then runs the forward model on this same problem
+    //! instance and would silently record NOTHING: endTimeStep() sees a null
+    //! recorder_ and does nothing, and the sweep only finds out later, as a
+    //! missing dataset. So the segment driver installs the recorder explicitly.
+    //!
+    //! \param archive In-memory archive holding this segment's states.
+    //! \param globalIndexOffset Global index of the segment's first substep, so
+    //!        the groups it writes match the global numbering the sweep reads.
+    void resetRecorder(std::shared_ptr<AdjointArchive> archive,
+                       int globalIndexOffset)
+    {
+        recorder_ = std::make_unique<AdjointRecorder<TypeTag>>(
+            this->simulator(), std::move(archive), globalIndexOffset,
+            /*segmentMode=*/true);
+        recorderInitialized_ = true;
+        // The segment's leading state is the checkpoint the driver restored, so
+        // there is no "initial" snapshot to take here.
+        initialRecorded_ = true;
+        substepInEpisode_ = 0;
+        // These report steps are being re-run, so their ECL output already
+        // exists; see writeOutput() below.
+        rerunning_ = true;
+    }
+
+    //! \brief Drop the segment recorder once its segment has been swept, so a
+    //!        later replayStep cannot record into a stale archive.
+    void clearRecorder()
+    {
+        recorder_.reset();
+        rerunning_ = false;
+    }
+
+    //! \brief Suppress ECL output while a segment is being recomputed.
+    //!
+    //! A recompute drives the real forward step, and runStep ends every report
+    //! step with writeOutput(true). Those report steps were already written by
+    //! the forward run, so letting the rerun write again would append duplicate
+    //! entries to the UNRST/summary of the very run we are differentiating.
+    //! The sweep's product is gradients, not ECL output, so a rerun writes
+    //! nothing. Only recomputed steps are affected: outside a segment
+    //! (rerunning_ == false) output behaves exactly as before.
+    void writeOutput(const bool verbose) override
+    {
+        if (rerunning_) {
+            return;
+        }
+        ParentType::writeOutput(verbose);
+    }
+
+    //! \brief Whether a recorder is currently installed (segment driver debug).
+    bool hasRecorder() const
+    {
+        return static_cast<bool>(recorder_);
+    }
+
     void beginEpisode() override
     {
         ParentType::beginEpisode();
@@ -147,6 +208,9 @@ private:
     int substepInEpisode_{0};
     bool recorderInitialized_{false};
     bool initialRecorded_{false};
+    //! Re-running already-simulated report steps for a checkpoint segment; see
+    //! writeOutput().
+    bool rerunning_{false};
 };
 
 } // namespace Opm

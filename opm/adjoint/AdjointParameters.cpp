@@ -47,7 +47,10 @@ AdjointConfig AdjointConfig::fromParameters()
     override_(config.save,             Parameters::AdjointSave{});
     override_(config.mode,             Parameters::AdjointMode{});
     override_(config.saveSystem,       Parameters::AdjointSaveSystem{});
+    override_(config.dumpSystemDir,    Parameters::AdjointDumpSystem{});
+    override_(config.dumpSystemStep,   Parameters::AdjointDumpSystemStep{});
     override_(config.slim,             Parameters::AdjointSlim{});
+    override_(config.checkpointEvery,  Parameters::AdjointCheckpointEvery{});
     override_(config.path,             Parameters::AdjointFile{});
     override_(config.replayTolerance,  Parameters::AdjointReplayTolerance{});
     override_(config.replayAbsTolerance, Parameters::AdjointReplayAbsTolerance{});
@@ -92,10 +95,22 @@ void registerAdjointParameters()
     Parameters::Register<Parameters::AdjointSaveSystem>
         ("Also store the converged residual and Jacobian of every accepted "
          "substep in the adjoint archive (verification data for replay tests)");
+    Parameters::Register<Parameters::AdjointDumpSystem>
+        ("Directory to write one backward substep's linear system to in "
+         "MatrixMarket format (A/B/C/D, right-hand side and adjoint), so it "
+         "can be reloaded and solved outside the simulator. Empty = off");
+    Parameters::Register<Parameters::AdjointDumpSystemStep>
+        ("Which backward substep --adjoint-dump-system writes; -1 (default) "
+         "is the first one solved, i.e. the last substep of the forward run");
     Parameters::Register<Parameters::AdjointSlim>
         ("Store slim per-substep snapshots (dynamic state only, skip the static "
          "Eclipse schedule reconstructed at replay); much smaller archives, off "
          "by default; not for runtime schedule-modifying (ACTIONX) decks");
+    Parameters::Register<Parameters::AdjointCheckpointEvery>
+        ("Snapshot stride for the adjoint archive. 1 (default) stores every "
+         "accepted substep. M>1 stores only every M-th and recomputes the "
+         "substeps in between during the backward sweep, trading storage for "
+         "one extra forward pass; needs fixed time stepping");
     Parameters::Register<Parameters::AdjointFile>
         ("Path of the adjoint archive. Empty means <output-dir>/<CASENAME>.ADJOINT[.h5]. "
          "A path ending in .h5/.hdf5 selects the HDF5 backend, anything else "
@@ -105,7 +120,9 @@ void registerAdjointParameters()
          "stored ones in adjoint replay");
     Parameters::Register<Parameters::AdjointLinearSolver>
         ("Linear solver for the transposed adjoint systems: umfpack "
-         "(direct), ilu0, cpr, cprt, or a FlexibleSolver *.json file");
+         "(direct), ilu0, cpr, cprt, system_cprt (wells kept in the coupled "
+         "system; needs --matrix-add-well-contributions=false), or a "
+         "FlexibleSolver *.json file");
     Parameters::Register<Parameters::AdjointLinearSolverReduction>
         ("Relative residual reduction for iterative adjoint solves");
     Parameters::Register<Parameters::AdjointLinearSolverMaxIter>

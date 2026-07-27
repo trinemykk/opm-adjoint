@@ -53,6 +53,7 @@
 #include <opm/adjoint/AdjointReplay.hpp>
 #include <opm/adjoint/AdjointResidualEvaluator.hpp>
 #include <opm/adjoint/AdjointWellAdjoint.hpp>
+#include <opm/adjoint/matrixMarketIO.hpp>
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
 
@@ -74,6 +75,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
@@ -161,6 +163,24 @@ public:
                                 config_.linearSolverMaxIter,
                                 config_.linearSolverVerbosity,
                                 pressureIndex);
+        coupledSystemSolve_ = linearSolver_.solvesCoupledSystem();
+        if (coupledSystemSolve_) {
+            if (parallel_.parallel() && linearSolver == "system_umfpack") {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-linear-solver=system_umfpack is a "
+                          "single-rank direct oracle; use system_cprt for "
+                          "parallel runs");
+            }
+            if (Parameters::Get<Parameters::MatrixAddWellContributions>()) {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-linear-solver=system_cprt keeps the wells "
+                          "in the coupled system and must be combined with "
+                          "--matrix-add-well-contributions=false");
+            }
+            OpmLog::info("Adjoint backward solve keeps the wells in the "
+                         "coupled system (system_cprt): no Schur fold, no "
+                         "--matrix-add-well-contributions needed.");
+        }
 #if HAVE_MPI
         if (parallel_.parallel()) {
             linearSolver_.setComm(parallel_.istlComm(),
@@ -199,6 +219,25 @@ public:
         if (numSubsteps == 0) {
             OpmLog::error("Adjoint archive contains no substeps");
             return EXIT_FAILURE;
+        }
+        if (!meta.allPayloadsPresent()) {
+            // This walks the run FORWARDS and touches every substep, so unlike
+            // the backward sweep it cannot be served segment by segment: a
+            // segment recompute would have to run the whole forward model again
+            // for each missing state. Refused rather than made quietly
+            // expensive - the objective is cheap to get from a normal forward
+            // run, which is what --adjoint-objective on the forward pass does.
+            OPM_THROW(std::runtime_error, fmt::format(
+                      "Objective-only evaluation needs the state of every "
+                      "substep, but this archive is checkpointed (stride {}): "
+                      "{} of {} substeps were not stored. Evaluate the objective "
+                      "during the forward run, or re-record with "
+                      "--adjoint-checkpoint-every=1.",
+                      meta.checkpointEvery,
+                      std::count_if(meta.substeps.begin(), meta.substeps.end(),
+                                    [](const AdjointSubstepMeta& m)
+                                    { return !m.hasPayload; }),
+                      numSubsteps));
         }
         Scalar value = 0.0;
         objective_.resetTermValues();
@@ -255,8 +294,10 @@ public:
             }
             timing_.replay += secs(t0, tick());
             // The well container is rebuilt by replayStep; check the Schur
-            // sparsity requirement once, now that the wells exist.
-            if (k == numSubsteps - 1) {
+            // sparsity requirement once, now that the wells exist. The
+            // coupled-system solve never folds the wells into the reservoir
+            // matrix, so it has no such requirement.
+            if (k == numSubsteps - 1 && !coupledSystemSolve_) {
                 checkWellContributionSparsity_();
             }
             const auto& step = meta.substeps[k];
@@ -281,17 +322,44 @@ public:
                 }
             }
 
-            // Schur-reduced matrix: A -= C^T D^-1 B (in place on the
-            // linearizer's matrix; it is re-assembled in the next
-            // replayStep anyway).
             t0 = tick();
             auto& jacobian = model.linearizer().jacobian();
-            simulator_.problem().wellModel().addWellContributions(jacobian);
+            bool wellStructureChanged = false;
+            if (coupledSystemSolve_) {
+                // Wells stay in the system: collect this substep's B/C/D and
+                // transpose them. No Schur fold, so the reservoir matrix keeps
+                // its plain neighbour sparsity and
+                // --matrix-add-well-contributions is not needed.
+                wellStructureChanged = wellSystem_.update(
+                    numCells, simulator_.problem().wellModel());
+            } else {
+                // Schur-reduced matrix: A -= C^T D^-1 B (in place on the
+                // linearizer's matrix; it is re-assembled in the next
+                // replayStep anyway).
+                simulator_.problem().wellModel().addWellContributions(jacobian);
+            }
             timing_.schur += secs(t0, tick());
 
-            // Solve A_red^T lambda_k = rhs.
+            // Solve the transposed system for lambda_k: either the
+            // Schur-reduced reservoir system A_red^T lambda = rhs, or the
+            // coupled [A^T B^T; C^T D^T] [lambda; nu_w] = [rhs; 0], which has
+            // the same lambda because rhs is already Schur-shifted (see
+            // AdjointLinearSolver::solveTransposedSystem).
             t0 = tick();
-            linearSolver_.solveTransposed(jacobian.istlMatrix(), rhs, lambda);
+            if (coupledSystemSolve_) {
+                linearSolver_.solveTransposedSystem(
+                    jacobian.istlMatrix(), wellSystem_.transposed(),
+                    wellStructureChanged, rhs, lambda);
+            } else {
+                linearSolver_.solveTransposed(jacobian.istlMatrix(), rhs, lambda);
+            }
+            if (!config_.dumpSystemDir.empty()) {
+                const int wanted = config_.dumpSystemStep < 0 ? numSubsteps - 1
+                                                              : config_.dumpSystemStep;
+                if (k == wanted) {
+                    dumpSystem_(k, jacobian.istlMatrix(), rhs, lambda);
+                }
+            }
             // lambda is owner-correct after the solve; make it consistent
             // on ghost cells so the flux/Bdiag cross terms (which read a
             // neighbor's lambda, possibly a ghost) are correct.
@@ -349,6 +417,66 @@ public:
     }
 
 private:
+    /*!
+     * \brief Write one backward substep's linear system to MatrixMarket
+     *        files (--adjoint-dump-system).
+     *
+     * The dumped system is the FORWARD one, `[A C; B D]` and the right-hand
+     * side; the adjoint solves its transpose. Keeping the untransposed blocks
+     * makes the files directly comparable with what the forward simulator
+     * would write, and the transpose is one call away (see
+     * AdjointSystemTranspose.hpp / tests/test_systemTranspose.cpp).
+     *
+     * With the Schur-folded solver, A is already the reduced matrix
+     * A - C^T D^-1 B and there are no separate well blocks; info.txt records
+     * which of the two it is so a reader cannot mistake one for the other.
+     */
+    void dumpSystem_(int k, const Matrix& matrix, const Vector& rhs,
+                     const Vector& lambda)
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir(config_.dumpSystemDir);
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec) {
+            OpmLog::error(fmt::format("--adjoint-dump-system: cannot create "
+                                      "'{}': {}", dir.string(), ec.message()));
+            return;
+        }
+
+        writeMatrixMarketFile(matrix, (dir / "A.mm").string());
+        writeVectorMarketFile(rhs, (dir / "rhs.mm").string());
+        writeVectorMarketFile(lambda, (dir / "lambda.mm").string());
+        if (coupledSystemSolve_) {
+            const auto& blocks = wellSystem_.forward();
+            writeMatrixMarketFile(blocks.B, (dir / "B.mm").string());
+            writeMatrixMarketFile(blocks.C, (dir / "C.mm").string());
+            writeMatrixMarketFile(blocks.D, (dir / "D.mm").string());
+        }
+
+        std::ofstream info(dir / "info.txt");
+        info << "# Adjoint linear system, MatrixMarket (full double precision)\n"
+             << "substep " << k << "\n"
+             << "solver " << linearSolver_.spec() << "\n"
+             << "form " << (coupledSystemSolve_ ? "coupled" : "schur_reduced")
+             << "\n"
+             << "num_res_cells " << matrix.N() << "\n";
+        if (coupledSystemSolve_) {
+            info << "num_well_dofs " << wellSystem_.numWellDofs() << "\n"
+                 << "# Forward system S = [A C; B D]; the adjoint solves\n"
+                 << "#   [A^T B^T; C^T D^T] [lambda; nu_w] = [rhs; 0].\n"
+                 << "# Block sizes: A 3x3, C 3x4, B 4x3, D 4x4.\n";
+        } else {
+            info << "# A is the Schur-reduced reservoir matrix "
+                    "A - C^T D^-1 B (wells eliminated);\n"
+                 << "# the adjoint solves A^T lambda = rhs. Block size 3x3.\n";
+        }
+        info.close();
+
+        OpmLog::info(fmt::format("Adjoint system of substep {} written to {}",
+                                 k, dir.string()));
+    }
+
     //! \brief Per-phase wall-clock breakdown of the backward sweep, to
     //!        guide where optimization effort is worthwhile.
     struct Timing
@@ -1979,6 +2107,11 @@ private:
     AdjointParallel<TypeTag> parallel_;
     AdjointObjectiveFunction<TypeTag> objective_;
     AdjointLinearSolver<Matrix, Vector> linearSolver_;
+    //! \brief Wells kept in the transposed system instead of Schur-folded.
+    bool coupledSystemSolve_ = false;
+    //! \brief Merged + transposed well blocks B^T/C^T/D^T of the current
+    //!        substep (only used when coupledSystemSolve_).
+    AdjointWellSystem<Scalar> wellSystem_;
     std::vector<bool> ownedFace_;
 
     std::vector<Scalar> gradientPv_;

@@ -42,6 +42,13 @@ struct AdjointSubstepMeta
     double startTime{0.0};    //!< simulation time at the start of the substep [s]
     double dt{0.0};           //!< substep length [s]
     unsigned newtonIterations{0}; //!< Newton iterations used in the forward solve
+    //! \brief Whether the state payload for this substep is in the archive.
+    //!
+    //! False under checkpointing (--adjoint-checkpoint-every > 1): the meta list
+    //! stays dense because the sweep needs dt/reportStep at every substep, but
+    //! only checkpoints carry a snapshot; the rest are recomputed. Also gates
+    //! the residual/Jacobian dumps, which only exist where a payload does.
+    bool hasPayload{true};
 
     template<class Serializer>
     void serializeOp(Serializer& serializer)
@@ -52,6 +59,7 @@ struct AdjointSubstepMeta
         serializer(startTime);
         serializer(dt);
         serializer(newtonIterations);
+        serializer(hasPayload);
     }
 
     bool operator==(const AdjointSubstepMeta& rhs) const
@@ -61,19 +69,26 @@ struct AdjointSubstepMeta
                substepInReport == rhs.substepInReport &&
                startTime == rhs.startTime &&
                dt == rhs.dt &&
-               newtonIterations == rhs.newtonIterations;
+               newtonIterations == rhs.newtonIterations &&
+               hasPayload == rhs.hasPayload;
     }
 };
 
 //! \brief Archive-level metadata, written once at the end of the forward run.
 struct AdjointMeta
 {
-    static constexpr int currentSchemaVersion = 1;
+    //! Bumped to 2 when hasPayload/checkpointEvery were added; the reader
+    //! rejects anything else outright (AdjointReplay's constructor).
+    static constexpr int currentSchemaVersion = 2;
 
     int schemaVersion{currentSchemaVersion};
     bool systemSaved{false};        //!< residual/Jacobian dumps present
     bool storageCacheEnabled{true}; //!< EnableStorageCache of the forward run
     bool slim{false};               //!< slim snapshots (no serialized schedule)
+    //! \brief Snapshot stride: 1 = every substep (no recompute needed), M > 1 =
+    //!        only every M-th substep carries a payload and the rest are
+    //!        recomputed forward from the preceding checkpoint.
+    int checkpointEvery{1};
     std::string caseName{};
     std::vector<AdjointSubstepMeta> substeps;
 
@@ -84,6 +99,7 @@ struct AdjointMeta
         serializer(systemSaved);
         serializer(storageCacheEnabled);
         serializer(slim);
+        serializer(checkpointEvery);
         serializer(caseName);
         serializer(substeps);
     }
@@ -94,8 +110,16 @@ struct AdjointMeta
                systemSaved == rhs.systemSaved &&
                storageCacheEnabled == rhs.storageCacheEnabled &&
                slim == rhs.slim &&
+               checkpointEvery == rhs.checkpointEvery &&
                caseName == rhs.caseName &&
                substeps == rhs.substeps;
+    }
+
+    //! \brief True when every substep carries its own snapshot, i.e. the sweep
+    //!        can read all state straight from the archive with no recompute.
+    bool allPayloadsPresent() const
+    {
+        return checkpointEvery <= 1;
     }
 };
 
