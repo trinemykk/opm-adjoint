@@ -206,7 +206,10 @@ int main(int argc, char** argv)
     //   - the Schur step (addWellContributions) needs the well coupling
     //     in the matrix sparsity, so default --matrix-add-well-contributions
     //     on (single-perforation decks are unaffected; multi-perforation
-    //     decks would otherwise crash without it);
+    //     decks would otherwise crash without it). The coupled-system
+    //     backward solve (--adjoint-linear-solver=system_cprt) keeps the
+    //     wells in the system instead of folding them, so it needs the flag
+    //     OFF - default it off there;
     //   - with that flag on, flow auto-promotes the forward solver "cpr"
     //     to "cprw" (CPR with the well system in the matrix), which is not
     //     registered in this build; "ilu0" is robust on any problem size
@@ -226,8 +229,25 @@ int main(int argc, char** argv)
         }
         return false;
     };
+    // The coupled-system backward solve wants the plain (unfolded) reservoir
+    // sparsity. Detect it here rather than in the problem, because the flag
+    // must be decided before the parameters are parsed.
+    auto optionValueIs = [argc, argv](const char* opt, const char* value) {
+        const std::string prefix = std::string(opt) + "=";
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg.starts_with(prefix)) {
+                return arg.compare(prefix.size(), std::string::npos, value) == 0;
+            }
+        }
+        return false;
+    };
+    const bool coupledSystemSolve =
+        optionValueIs("--adjoint-linear-solver", "system_cprt");
     if (!hasOption("--matrix-add-well-contributions")) {
-        injected.emplace_back("--matrix-add-well-contributions=true");
+        injected.emplace_back(coupledSystemSolve
+                                  ? "--matrix-add-well-contributions=false"
+                                  : "--matrix-add-well-contributions=true");
     }
     if (!hasOption("--linear-solver")) {
         injected.emplace_back("--linear-solver=ilu0");

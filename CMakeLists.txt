@@ -86,6 +86,18 @@ target_link_libraries(flow_adjoint
     moduleVersionAdjoint
 )
 
+# Standalone driver for a system dumped with --adjoint-dump-system: rebuilds
+# the transposed coupled system from the MatrixMarket files and solves it
+# without the simulator, so preconditioner settings can be tried against a
+# real field system in seconds.
+add_executable(adjoint_system_solve
+  examples/adjoint_system_solve.cpp
+)
+target_link_libraries(adjoint_system_solve
+  PUBLIC
+    opmadjoint
+)
+
 # Look for the opm-tests repository; sets HAVE_OPM_TESTS / OPM_TESTS_ROOT.
 include(Findopm-tests)
 
@@ -216,6 +228,24 @@ if(HAVE_OPM_TESTS)
               ${_testout}/solver_spe9 1e-7 cprt)
     set_tests_properties(adjoint_solver_spe9 PROPERTIES
       LABELS field TIMEOUT 600 ENVIRONMENT "METRIC=field")
+    # The real motivation for the coupled system: SPE9's wells have many
+    # perforations, so the Schur-folded path needs
+    # --matrix-add-well-contributions and this one does not.
+    add_test(NAME adjoint_system_cprt_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-system-cprt-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
+              ${_testout}/system_cprt_spe9 1e-10)
+    set_tests_properties(adjoint_system_cprt_spe9 PROPERTIES
+      LABELS field TIMEOUT 600 ENVIRONMENT "METRIC=field")
+    # Field-scale parallel gate for the coupled system (9000 cells, np=2).
+    add_test(NAME adjoint_mpi_system_cprt_spe9
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-mpi-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA
+              ${_testout}/mpi_system_cprt_spe9 2 1e-3 system_cprt)
+    set_tests_properties(adjoint_mpi_system_cprt_spe9 PROPERTIES
+      LABELS field TIMEOUT 600)
     # Larger parallel gate: np=2 gradients on SPE9 (9000 cells) must match the
     # serial cprt reference — the field-scale check the tiny SPE1 mpi test cannot
     # provide. Exercises the parallel transposed CPR on the consistent transpose
@@ -354,6 +384,31 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-mpi-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/mpi_spe1 2)
+    # Coupled-system backward solve (wells kept in the transposed system, no
+    # --matrix-add-well-contributions) against its direct oracle, on the same
+    # recorded archive so only the linear solve differs.
+    add_test(NAME adjoint_system_cprt_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-system-cprt-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA
+              ${_testout}/system_cprt_spe1 1e-8)
+    # Multisegment wells: exercises the MSW branch of addBCDMatrix, whose
+    # D block is segment-coupled rather than a single dense well block.
+    add_test(NAME adjoint_system_cprt_msw_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-system-cprt-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE2_MSW.DATA
+              ${_testout}/system_cprt_msw_spe1 1e-9)
+    set_tests_properties(adjoint_system_cprt_msw_spe1 PROPERTIES
+      ENVIRONMENT "METRIC=field")
+    # Parallel coupled-system solve: np=2 vs serial. The well blocks are
+    # rank-local (wells are never split), A^T comes from the consistent
+    # parallel transpose, and the CPR weights are made owner-consistent.
+    add_test(NAME adjoint_mpi_system_cprt_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-mpi-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA
+              ${_testout}/mpi_system_cprt_spe1 2 1e-4 system_cprt)
   endif()
 endif()
 # Match the opm build conventions (notably -UNDEBUG in Release when

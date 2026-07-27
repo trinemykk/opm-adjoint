@@ -15,16 +15,21 @@
 # ranks (the earlier "cprt false-converges in parallel" was the incomplete
 # local transpose). cpr/ilu0 remain valid alternatives.
 #
+# With --adjoint-linear-solver=system_cprt the wells stay in the coupled
+# transposed system instead of being Schur-folded; that path needs
+# --matrix-add-well-contributions=false, which this script then supplies.
+#
 # Usage:
-#   run-adjoint-mpi-test.sh <flow_adjoint> <deck.DATA> <output-dir> [nprocs] [rel-tol]
+#   run-adjoint-mpi-test.sh <flow_adjoint> <deck.DATA> <output-dir> [nprocs] [rel-tol] [solver]
 
 set -u
 
-FLOW=${1:?usage: $0 <flow_adjoint> <deck.DATA> <output-dir> [nprocs] [rel-tol]}
+FLOW=${1:?usage: $0 <flow_adjoint> <deck.DATA> <output-dir> [nprocs] [rel-tol] [solver]}
 DECK=${2:?missing deck}
 OUTDIR=${3:?missing output dir}
 NP=${4:-2}
 RELTOL=${5:-1e-4}
+SOLVER=${6:-cprt}
 
 MPIRUN=${MPIRUN:-mpirun}
 if ! command -v "${MPIRUN}" >/dev/null 2>&1; then
@@ -49,6 +54,13 @@ STRICT="--enable-storage-cache=false \
  --tolerance-mb=1e-9 --tolerance-mb-relaxed=1e-9 \
  --adjoint-objective=pressure-average"
 
+# The coupled-system solver keeps the wells out of the reservoir matrix, and
+# the same setting must hold for the recording forward run so both share one
+# trajectory.
+case "${SOLVER}" in
+    system_*) STRICT="${STRICT} --matrix-add-well-contributions=false" ;;
+esac
+
 run() { # <nprocs> <subdir> <extra-flags...>
     local np=$1 sub=$2; shift 2
     local dir="${OUTDIR}/${sub}"
@@ -65,7 +77,7 @@ mkdir -p "${OUTDIR}"
 echo "=== serial (np=1) record + gradient ==="
 run 1 serial --adjoint-save=true --threads-per-process=1 \
     || { echo "serial forward FAILED"; tail -5 "${OUTDIR}/serial/run.log"; exit 1; }
-run 1 serial --adjoint-mode=gradient --adjoint-linear-solver=cprt \
+run 1 serial --adjoint-mode=gradient --adjoint-linear-solver="${SOLVER}" \
     --threads-per-process=1 \
     || { echo "serial gradient FAILED"; tail -5 "${OUTDIR}/serial/run.log"; exit 1; }
 cp "${OUTDIR}/serial/${DECKNAME}.ADJOINT_GRADIENTS_PV.txt" "${OUTDIR}/pv_serial.txt"
@@ -73,7 +85,7 @@ cp "${OUTDIR}/serial/${DECKNAME}.ADJOINT_GRADIENTS_PV.txt" "${OUTDIR}/pv_serial.
 echo "=== parallel (np=${NP}) record + gradient ==="
 run "${NP}" parallel --adjoint-save=true \
     || { echo "parallel forward FAILED"; tail -8 "${OUTDIR}/parallel/run.log"; exit 1; }
-run "${NP}" parallel --adjoint-mode=gradient --adjoint-linear-solver=cprt \
+run "${NP}" parallel --adjoint-mode=gradient --adjoint-linear-solver="${SOLVER}" \
     || { echo "parallel gradient FAILED"; tail -8 "${OUTDIR}/parallel/run.log"; exit 1; }
 cp "${OUTDIR}/parallel/${DECKNAME}.ADJOINT_GRADIENTS_PV.txt" "${OUTDIR}/pv_parallel.txt"
 

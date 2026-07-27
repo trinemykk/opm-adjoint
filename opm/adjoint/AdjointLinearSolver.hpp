@@ -68,6 +68,10 @@
 #include <opm/simulators/linalg/getQuasiImpesWeights.hpp>
 #include <opm/simulators/linalg/setupPropertyTree.hpp>
 
+#include <opm/simulators/linalg/system/SystemPreconditionerFactory.hpp>
+#include <opm/simulators/linalg/system/SystemTypes.hpp>
+
+#include <opm/adjoint/AdjointSystemTranspose.hpp>
 #include <opm/adjoint/transposeMatrix.hpp>
 #include <opm/adjoint/parallelTransposeMatrix.hpp>
 
@@ -212,6 +216,9 @@ template<class Matrix, class Vector>
 class AdjointLinearSolver
 {
 public:
+    //! \brief Scalar of the coupled (reservoir+well) system types.
+    using SystemScalar = typename Matrix::field_type;
+
     //! \brief Select solver and tolerances; must be called before solves.
     //!
     //! \param spec "umfpack", "ilu0", "cpr", "cprt", or a path to a
@@ -232,6 +239,15 @@ public:
         // pre-WS3 behaviour).
         cachedSerialSolver_.reset();
         cachedOp_.reset();
+        cachedSysSolver_.reset();
+        cachedSysOp_.reset();
+        systemSolver_ = false;
+        systemDirect_ = false;
+#if HAVE_MPI
+        cachedSysParSolver_.reset();
+        cachedSysParOp_.reset();
+        sysComm_.reset();
+#endif
 #if HAVE_MPI
         cachedParSolver_.reset();
         cachedParOp_.reset();
@@ -260,29 +276,65 @@ public:
         } else if (spec_ == "cpr" || spec_ == "cprt") {
             prm_ = setupCPR("cpr_quasiimpes", params);
             prm_.put("preconditioner.type", spec_);
+        } else if (spec_ == "system_umfpack") {
+            // Direct oracle for the coupled path: flattens S^T into one
+            // scalar matrix and factorizes it. The analogue of "umfpack" for
+            // the Schur-folded path - exact, and only affordable on small
+            // cases, so it is the verification reference, not a production
+            // option. No property tree involved.
+            systemSolver_ = true;
+            systemDirect_ = true;
+            return;
+        } else if (spec_ == "system_cprt") {
+            // Wells stay IN the system: the transposed 2x2 block system
+            // [A^T B^T; C^T D^T] is solved with opm's `system_cpr` block
+            // preconditioner, whose reservoir stage is flipped to the
+            // transposed CPR. `add_wells` is false in that stage, so this
+            // uses the ordinary (transpose-capable) PressureTransferPolicy
+            // and needs no `cprwt`.
+            prm_ = setupAdjointSystemCPR(reduction, maxIter, verbosity);
         } else {
             OPM_THROW(std::runtime_error,
                       "Unknown --adjoint-linear-solver '" + spec_ +
-                      "' (use umfpack, ilu0, cpr, cprt or a "
-                      "FlexibleSolver *.json file)");
+                      "' (use umfpack, ilu0, cpr, cprt, system_cprt, "
+                      "system_umfpack or a FlexibleSolver *.json file)");
         }
 
-        const auto precType =
-            prm_.get<std::string>("preconditioner.type", "");
+        const auto topType = prm_.get<std::string>("preconditioner.type", "");
+        systemSolver_ = (topType == "system_cpr");
+        // For the coupled system the CPR flavour is set on the reservoir
+        // sub-solver, not at the top level.
+        const auto precType = systemSolver_
+            ? prm_.get<std::string>(resSolverPrecPath_ + ".type", "")
+            : topType;
         usesCprWeights_ = (precType == "cpr" || precType == "cprt" ||
                            precType == "cprw" || precType == "cprwt");
         transposedWeights_ = (precType == "cprt" || precType == "cprwt");
         if (usesCprWeights_) {
+            const auto weightsPath = systemSolver_
+                ? resSolverPrecPath_ + ".weight_type"
+                : std::string("preconditioner.weight_type");
             const auto weightsType =
-                prm_.get<std::string>("preconditioner.weight_type",
-                                      "quasiimpes");
+                prm_.get<std::string>(weightsPath, "quasiimpes");
             if (weightsType != "quasiimpes") {
                 OPM_THROW(std::runtime_error,
                           "Adjoint CPR supports quasiimpes weights only "
                           "(trueimpes needs forward-simulator internals)");
             }
         }
+        if (systemSolver_ && !transposedWeights_) {
+            OPM_THROW(std::runtime_error,
+                      "The adjoint coupled-system solve needs a transposed "
+                      "reservoir CPR: set " + resSolverPrecPath_ +
+                      ".type to 'cprt'");
+        }
     }
+
+    //! \brief True when the configured solver keeps the wells in the coupled
+    //!        system (so the caller must NOT fold them via the Schur
+    //!        complement, and needs no --matrix-add-well-contributions).
+    bool solvesCoupledSystem() const
+    { return systemSolver_; }
 
     //! \brief Solve A^T x = b.
     //!
@@ -297,6 +349,60 @@ public:
         } else {
             solveIterative_(matrix, rhs, solution);
         }
+        ++numSolves_;
+    }
+
+    /*!
+     * \brief Solve the transposed COUPLED system, wells included.
+     *
+     * \code
+     *   [ A^T  B^T ] [ lambda_r ]   [ rhs ]
+     *   [ C^T  D^T ] [ nu_w     ] = [  0  ]
+     * \endcode
+     *
+     * The zero well block is not an approximation. The caller's \p rhs is
+     * already the Schur-shifted right-hand side g_r - B^T D^-T g_w (the
+     * adjoint applies the well objective term that way), and with
+     * mu_w = D^-T g_w, lambda_w = mu_w + nu_w the two systems
+     *   [.. ..] [lambda_r; lambda_w] = [g_r; g_w]
+     *   [.. ..] [lambda_r; nu_w    ] = [g_r - B^T mu_w; 0]
+     * have the SAME lambda_r. Only lambda_r is returned; the well adjoints
+     * are recovered by the caller as before. This mirrors the forward solve,
+     * which likewise zeroes the well right-hand side and keeps only the
+     * reservoir part of the solution (ISTLSolverSystem::solve).
+     *
+     * \param matrix              forward reservoir Jacobian A, WITHOUT the
+     *                            well Schur complement folded in
+     * \param wellBlocks          B^T, C^T, D^T of the same substep
+     * \param wellStructureChanged rebuild rather than update the solver
+     */
+    void solveTransposedSystem(const Matrix& matrix,
+                               const TransposedWellBlocks<SystemScalar>& wellBlocks,
+                               bool wellStructureChanged,
+                               Vector rhs,
+                               Vector& solution)
+    {
+        static_assert(std::is_same_v<Matrix, RRMatrix<SystemScalar>> &&
+                      std::is_same_v<Vector, ResVector<SystemScalar>>,
+                      "The coupled-system adjoint solve is built on opm's "
+                      "system_cpr types, which are fixed to standard 3-phase "
+                      "blackoil (3 reservoir equations, 4 well equations)");
+        solution.resize(rhs.size());
+        solution = 0.0;
+#if HAVE_MPI
+        // All ranks must agree on whether the well structure changed: the
+        // rebuild path runs MPI-collective setup (the parallel AMG hierarchy)
+        // while the update path does not, so a rank-local decision deadlocks.
+        // Wells opening/closing mid-schedule is enough to split the ranks -
+        // this hangs on Norne, not on SPE1/SPE9. Mirrors the same reduction in
+        // ISTLSolverSystem::prepareSystemSolver.
+        if (comm_) {
+            wellStructureChanged =
+                comm_->communicator().max(
+                    static_cast<int>(wellStructureChanged)) > 0;
+        }
+#endif
+        solveCoupled_(matrix, wellBlocks, wellStructureChanged, rhs, solution);
         ++numSolves_;
     }
 
@@ -402,6 +508,202 @@ private:
         OpmLog::debug(fmt::format("adjoint linear solve ({}): {} iterations, "
                                   "reduction {:.3e}",
                                   spec_, result.iterations, result.reduction));
+    }
+
+    //! \brief Serial solve of the transposed coupled system with `system_cprt`.
+    //!
+    //! Assembles S^T = [A^T B^T; C^T D^T] as an ordinary `Opm::SystemMatrix`
+    //! - the block shapes of B^T and C^T are exactly those of C and B, so the
+    //! transpose reuses every existing operator/preconditioner/solver
+    //! instantiation - and hands it to opm's `system_cpr` block preconditioner
+    //! with a transposed CPR in its reservoir stage.
+    void solveCoupled_(const Matrix& matrix,
+                       const TransposedWellBlocks<SystemScalar>& wellBlocks,
+                       bool wellStructureChanged,
+                       Vector& rhs,
+                       Vector& solution)
+    {
+        // A^T: the plain local transpose in serial, the communicated
+        // parallel-consistent one otherwise. The well blocks need no
+        // communication - a well lives whole on one rank
+        // (AllowDistributedWells=false), so B/C/D and their transposes are
+        // rank-local by construction.
+#if HAVE_MPI
+        if (comm_) {
+            buildConsistentParallelTranspose(matrix, *comm_, cachedTranspose_);
+            invalidateRows_(cachedTranspose_, *overlapRows_); // ghost -> identity
+            for (const int row : *overlapRows_) {
+                rhs[row] = 0.0;
+            }
+            if (verifyTranspose_) {
+                verifyTransposeExact_(matrix, cachedTranspose_);
+            }
+        } else
+#endif
+        {
+            transposeBlockMatrixInto(matrix, cachedTranspose_);
+        }
+
+        // The pointers are to stable member/caller objects that are refilled
+        // in place; only their contents change between substeps.
+        sysMatrix_ = makeSystemMatrix<SystemScalar>(
+            cachedTranspose_, wellBlocks.Bt, wellBlocks.Ct, wellBlocks.Dt);
+
+        const std::size_t numRes = cachedTranspose_.N();
+        const std::size_t numWell = wellBlocks.Dt.N();
+        sysRhs_[_0] = rhs;
+        sysRhs_[_1].resize(numWell);
+        sysRhs_[_1] = 0.0;               // see solveTransposedSystem()
+        sysSol_[_0].resize(numRes);
+        sysSol_[_0] = 0.0;
+        sysSol_[_1].resize(numWell);
+        sysSol_[_1] = 0.0;
+
+        if (systemDirect_) {
+            solveCoupledDirect_(solution);
+            return;
+        }
+
+        using Clock = std::chrono::steady_clock;
+        const auto tSetup0 = Clock::now();
+        Dune::InverseOperatorResult result;
+#if HAVE_MPI
+        if (comm_) {
+            const bool rebuild = !reusePreconditioner_ || !cachedSysParSolver_ ||
+                                 wellStructureChanged;
+            if (rebuild) {
+                buildCoupledParallelSolver_();
+            } else {
+                cachedSysParSolver_->preconditioner().update();
+            }
+            setupSeconds_ += std::chrono::duration<double>(
+                Clock::now() - tSetup0).count();
+            const auto tApply0 = Clock::now();
+            cachedSysParSolver_->apply(sysSol_, sysRhs_, result);
+            applySeconds_ += std::chrono::duration<double>(
+                Clock::now() - tApply0).count();
+        } else
+#endif
+        {
+            const bool rebuild = !reusePreconditioner_ || !cachedSysSolver_ ||
+                                 wellStructureChanged;
+            if (rebuild) {
+                cachedSysSolver_.reset();  // free before the operator it uses
+                cachedSysOp_ = std::make_unique<SystemOperator>(sysMatrix_);
+                cachedSysWeights_ = makeCoupledWeights_();
+                cachedSysSolver_ =
+                    std::make_unique<Dune::FlexibleSolver<SystemOperator>>(
+                        *cachedSysOp_, prm_, cachedSysWeights_, pressureIndex_);
+            } else {
+                cachedSysSolver_->preconditioner().update();
+            }
+            setupSeconds_ += std::chrono::duration<double>(
+                Clock::now() - tSetup0).count();
+            const auto tApply0 = Clock::now();
+            cachedSysSolver_->apply(sysSol_, sysRhs_, result);
+            applySeconds_ += std::chrono::duration<double>(
+                Clock::now() - tApply0).count();
+        }
+
+        if (!result.converged) {
+            OPM_THROW(std::runtime_error,
+                      fmt::format("Adjoint coupled-system solver '{}' did not "
+                                  "converge in {} iterations "
+                                  "(reduction achieved {:.3e})",
+                                  spec_, result.iterations, result.reduction));
+        }
+        totalIterations_ += result.iterations;
+        OpmLog::debug(fmt::format("adjoint coupled solve ({}): {} iterations, "
+                                  "reduction {:.3e}",
+                                  spec_, result.iterations, result.reduction));
+
+        solution = sysSol_[_0];
+    }
+
+    //! \brief Weights for the coupled solve: transposed quasi-impes on A^T in
+    //!        the reservoir slot (the well slot is unused - the system_cpr
+    //!        creator only reads [_0]).
+    //!
+    //! In parallel the weights are made owner-consistent before the CPR builds
+    //! its coarse matrix: cprt's coarse assembly indexes weights by COLUMN, so
+    //! an owned row's ghost columns need the ghost cell's OWNER weights. The
+    //! locally computed ones come from A^T's identity-invalidated ghost rows
+    //! and are wrong. Same fix as the reservoir-only parallel path.
+    std::function<SystemVector<SystemScalar>()> makeCoupledWeights_()
+    {
+        const Matrix& transposedA = cachedTranspose_;
+        const std::size_t pIdx = pressureIndex_;
+#if HAVE_MPI
+        const Dune::OwnerOverlapCopyCommunication<int, int>* comm = comm_;
+#endif
+        return [&transposedA, pIdx
+#if HAVE_MPI
+                , comm
+#endif
+        ]() {
+            SystemVector<SystemScalar> weights;
+            weights[_0] = Amg::getQuasiImpesWeights<Matrix, Vector>(
+                transposedA, pIdx, /*transpose=*/true,
+                /*enable_thread_parallel=*/false);
+#if HAVE_MPI
+            if (comm) {
+                comm->copyOwnerToAll(weights[_0], weights[_0]);
+            }
+#endif
+            return weights;
+        };
+    }
+
+#if HAVE_MPI
+    //! \brief Build the parallel coupled solver.
+    //!
+    //! The communication is a MultiCommunicator over (reservoir comm, well
+    //! comm): the reservoir part is the ordinary owner/overlap/copy
+    //! communication, the well part is Dune::JacComm, which treats well DOFs
+    //! as rank-private and only sums inner products across ranks - correct
+    //! here because wells are never split across ranks.
+    void buildCoupledParallelSolver_()
+    {
+        cachedSysParSolver_.reset();  // free before the operator/comm it uses
+        cachedSysParOp_.reset();
+        sysComm_ = std::make_unique<SystemComm>(*comm_, wellComm_);
+        cachedSysParOp_ = std::make_unique<SystemParOperator>(sysMatrix_,
+                                                              *sysComm_);
+        cachedSysWeights_ = makeCoupledWeights_();
+        cachedSysParSolver_ =
+            std::make_unique<Dune::FlexibleSolver<SystemParOperator>>(
+                *cachedSysParOp_, *sysComm_, prm_, cachedSysWeights_,
+                pressureIndex_);
+    }
+#endif
+
+    //! \brief Exact reference for the coupled path: factorize the flattened
+    //!        S^T. Expects sysMatrix_/sysRhs_/sysSol_ to be set up already.
+    void solveCoupledDirect_([[maybe_unused]] Vector& solution)
+    {
+#if HAVE_SUITESPARSE_UMFPACK
+        auto flat = flattenSystem(sysMatrix_);
+        Dune::BlockVector<Dune::FieldVector<SystemScalar, 1>> flatRhs, flatSol;
+        flattenSystemVector(sysRhs_, flatRhs);
+        flatSol.resize(flatRhs.size());
+        flatSol = 0.0;
+
+        Dune::UMFPack<FlatSystemMatrix<SystemScalar>> solver(flat, /*verbose=*/0);
+        Dune::InverseOperatorResult result;
+        solver.apply(flatSol, flatRhs, result);
+        if (!result.converged) {
+            OPM_THROW(std::runtime_error,
+                      "UMFPACK failed to solve the transposed coupled "
+                      "(adjoint) system");
+        }
+        unflattenSystemVector(flatSol, sysSol_);
+        solution = sysSol_[_0];
+#else
+        OPM_THROW(std::runtime_error,
+                  "--adjoint-linear-solver=system_umfpack requires "
+                  "SuiteSparse; this build has no SuiteSparse support. Use "
+                  "system_cprt instead.");
+#endif
     }
 
     //! \brief Serial iterative solve via FlexibleSolver on the explicit
@@ -589,7 +891,13 @@ private:
     PropertyTree prm_{};
     bool usesCprWeights_ = false;
     bool transposedWeights_ = false;
+    bool systemSolver_ = false;  //!< wells kept in the coupled system
+    bool systemDirect_ = false;  //!< coupled system solved directly (oracle)
     std::size_t pressureIndex_ = 1;
+
+    //! Where the CPR flavour lives inside a `system_cpr` property tree.
+    inline static const std::string resSolverPrecPath_ =
+        "preconditioner.reservoir_solver.preconditioner";
 #if HAVE_MPI
     const Dune::OwnerOverlapCopyCommunication<int, int>* comm_ = nullptr;
     const std::vector<int>* overlapRows_ = nullptr;
@@ -627,6 +935,28 @@ private:
                                     Dune::OwnerOverlapCopyCommunication<int, int>>;
     std::unique_ptr<ParallelOperator> cachedParOp_;
     std::unique_ptr<Dune::FlexibleSolver<ParallelOperator>> cachedParSolver_;
+#endif
+
+    // Coupled-system (system_cprt) path. Same reuse story as the reservoir-only
+    // caches: the sparsity is constant across the sweep unless the well
+    // structure changes, so the solver is built once and refreshed in place.
+    // Declared last so it is destroyed before cachedTranspose_/sysMatrix_.
+    static constexpr auto _0 = Dune::Indices::_0;
+    static constexpr auto _1 = Dune::Indices::_1;
+    using SystemOperator = Opm::SystemSeqOp<SystemScalar>;
+    SystemMatrix<SystemScalar> sysMatrix_{};
+    SystemVector<SystemScalar> sysRhs_{};
+    SystemVector<SystemScalar> sysSol_{};
+    std::unique_ptr<SystemOperator> cachedSysOp_;
+    std::unique_ptr<Dune::FlexibleSolver<SystemOperator>> cachedSysSolver_;
+    std::function<SystemVector<SystemScalar>()> cachedSysWeights_;
+
+#if HAVE_MPI
+    using SystemParOperator = Opm::SystemParOp<SystemScalar>;
+    Dune::JacComm wellComm_{};   //!< well DOFs are rank-private
+    std::unique_ptr<SystemComm> sysComm_;
+    std::unique_ptr<SystemParOperator> cachedSysParOp_;
+    std::unique_ptr<Dune::FlexibleSolver<SystemParOperator>> cachedSysParSolver_;
 #endif
 };
 

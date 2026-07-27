@@ -7,6 +7,7 @@ list (APPEND MAIN_SOURCE_FILES
 
 list (APPEND TEST_SOURCE_FILES
   tests/test_AdjointStorage.cpp
+  tests/test_systemTranspose.cpp
   tests/test_transposeMatrix.cpp
 )
 
@@ -28,7 +29,9 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/adjoint/AdjointReplay.hpp
   opm/adjoint/AdjointStorage.hpp
   opm/adjoint/AdjointSystemIO.hpp
+  opm/adjoint/AdjointSystemTranspose.hpp
   opm/adjoint/AdjointWellModel.hpp
+  opm/adjoint/matrixMarketIO.hpp
   opm/adjoint/parallelTransposeMatrix.hpp
   opm/adjoint/transposeMatrix.hpp
 )

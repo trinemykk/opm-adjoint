@@ -17,6 +17,11 @@ pattern), built against a near-stock `opm-simulators`.
 4. `adjoint_code_assessment.md` — fresh code review (findings F1–F7, perf P1–P3).
 5. Auto-memory `adjoint-project-state` — full decision/commit history.
 
+6. `HANDOVER_storage.md` — **the current field-scale blocker.** The backward solve is
+   cheap now (~1.2× forward memory, ~1.5× forward time); the archive is not: full Norne
+   needs ~7.3 GB of snapshots per forward run. Measured attribution (`problem` = 89.5 % at
+   field scale), ranked work items and verification plan live there.
+
 Background (read on demand): `adjoint_plan.md` (design + PR sequencing),
 `adjoint_status.md` (feature catalog + explicitly-updated-quantities table),
 `adjoint_refactoring.md` (WellAssemblyState Stage-1/2/3), `adjoint_testing.md`,
@@ -84,7 +89,56 @@ ctest -R adjoint_fd   # just the FD-vs-adjoint gradient checks
 - **`matchref` reference summaries must live OUTSIDE `--output-dir`** — gradient/objective/
   replay runs truncate summary files in their output dir at startup.
 - **Multi-perf wells** need `--matrix-add-well-contributions=true` (now injected by default
-  in `flow_adjoint main()`, with `--linear-solver=ilu0`).
+  in `flow_adjoint main()`, with `--linear-solver=ilu0`) — *unless* you use
+  `--adjoint-linear-solver=system_cprt`, see below.
+- **Coupled-system backward solve (`--adjoint-linear-solver=system_cprt`)** keeps the wells
+  IN the transposed system `[Aᵀ Bᵀ; Cᵀ Dᵀ]` instead of folding them through the Schur
+  complement, so it runs **without `--matrix-add-well-contributions`** (flow_adjoint defaults
+  the flag to false for `system_*` solvers). Built on opm's `system_cpr` stack
+  (`opm-simulators/opm/simulators/linalg/system/`): the well blocks come from the public
+  `BlackoilWellModel::addBCDMatrix` + `WellMatrixMerger`, all four blocks are transposed with
+  the existing `transposeBlockMatrixTo` (already rectangular-safe), and the *same*
+  `SystemPreconditioner` is reused with its reservoir stage flipped `cpr`→`cprt`. **No new
+  well code, no new template instantiations, no opm-simulators changes.** It needs no `cprwt`
+  because `setupSystemCPR` sets `add_wells=false` in that stage, so it uses the ordinary
+  transpose-capable `PressureTransferPolicy`. **Serial and parallel**; standard 3-phase
+  blackoil only (`SystemTypes.hpp` hardcodes 3 reservoir / 4 well dofs). In parallel `Aᵀ`
+  comes from `buildConsistentParallelTranspose` (ghost rows → identity) and the operator is
+  `SystemParOp` over `MultiCommunicator(resComm, JacComm)`; the well blocks need no
+  communication because a well is never split across ranks
+  (`AllowDistributedWells=false`), and the CPR weights get the same `copyOwnerToAll` as the
+  reservoir-only path. Iterations are flat in rank count (SPE1 8.4 at np=2/3/4 vs 7.6
+  serial; SPE9 13.0/12.8/12.9 at np=1/2/4). **Why the well rhs is zero:** the
+  adjoint's rhs is already the Schur-shifted `g_r − BᵀD⁻ᵀg_w`, and
+  `[Aᵀ Bᵀ; Cᵀ Dᵀ][λ_r; ν_w] = [that; 0]` has the same `λ_r` — so `computeWellAdjoints_` and
+  the whole rhs assembly are untouched. Accuracy: matches its direct oracle
+  (`system_umfpack`) to ~8e-12 on SPE9; on SPE1 it beats the Schur path against `umfpack`
+  (4e-10 vs 9.6e-7) because it never forms `CᵀD⁻¹B`. Costs a few more iterations
+  (SPE9 13.0 vs 9.5, SPE1 7.5 vs 6.2).
+- **Norne parallel replay: fixed (2026-07-26), was an upstream bug.** Parallel adjoint
+  replay of a deck whose wells are drilled progressively aborted with
+  `Error deserializing WellState: size mismatch` (`WellState.hpp:347`) — on *both* the
+  `cprt`+Schur and `system_cprt` paths, so it was never solver-related.
+  `BlackoilWellModelGeneric::prepareDeserialize` only called `wellState().resize(...)`
+  `if (!wells_ecl_.empty())`; on a rank with no local wells at that report step the
+  PREVIOUS call's well state survived, so it no longer described `report_step`. A forward
+  restart never notices (one step into a fresh model), but walking a run *backwards* does:
+  a rank goes from "has wells" to "has none" moving to earlier steps, and the stale
+  non-empty state meets a stored empty one. SPE1/SPE9 have all wells from step 0 and never
+  hit it. Fix: resize unconditionally (`resize` handles an empty well list). Verified on
+  Norne np=2 — `system_cprt` and `cprt`+Schur agree to **1.4e-10** on the same archive;
+  serial-vs-parallel is 8.3e-4, which is the forward trajectory (J itself differs 1.2e-6),
+  not the adjoint. Debug aid: `OPM_ADJOINT_WELLSTATE_DIAG=1` prints recorded vs
+  reconstructed well-state sizes per rank/substep.
+- **Dump a system and solve it standalone:** `--adjoint-dump-system=<dir>` writes
+  `A/B/C/D/rhs/lambda.mm` (standard MatrixMarket, full precision — loadable in
+  MATLAB/MRST/Julia/scipy) for one substep, and `adjoint_system_solve <dir> [config.json]`
+  rebuilds the transposed system and solves it outside the simulator. Reproduces the
+  simulator's λ exactly, so preconditioner settings can be tried on a real field system in
+  milliseconds instead of a whole sweep. NB `Dune::readMatrixMarket` cannot load
+  rectangular-block matrices (its `readSparseEntries` asserts `row/bcols < N()` where it
+  means `row/brows`, and OPM Release builds with `-UNDEBUG`); `matrixMarketIO.hpp` reads
+  scalar and re-blocks instead.
 - **Solver choice:** serial fastest = `cprt`; parallel auto-selects `cprt` too and now
   matches serial convergence (SPE9: 9.4 iters/solve at np2 and np4, vs serial 9.5). Parallel
   builds the exact consistent transpose `M=Aᵀ` (`buildConsistentParallelTranspose`, verified
