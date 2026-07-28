@@ -95,12 +95,15 @@ public:
     //! \param archive In-memory archive holding this segment's states.
     //! \param globalIndexOffset Global index of the segment's first substep, so
     //!        the groups it writes match the global numbering the sweep reads.
+    //! \param recordedMeta Metadata of the archive being swept; the segment must
+    //!        be written in the same format the reader expects.
     void resetRecorder(std::shared_ptr<AdjointArchive> archive,
-                       int globalIndexOffset)
+                       int globalIndexOffset,
+                       const AdjointMeta& recordedMeta)
     {
         recorder_ = std::make_unique<AdjointRecorder<TypeTag>>(
             this->simulator(), std::move(archive), globalIndexOffset,
-            /*segmentMode=*/true);
+            &recordedMeta);
         recorderInitialized_ = true;
         // The segment's leading state is the checkpoint the driver restored, so
         // there is no "initial" snapshot to take here.

@@ -27,6 +27,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/adjoint/AdjointParameters.hpp
   opm/adjoint/AdjointRecorder.hpp
   opm/adjoint/AdjointReplay.hpp
+  opm/adjoint/AdjointSegmentSource.hpp
   opm/adjoint/AdjointStorage.hpp
   opm/adjoint/AdjointSystemIO.hpp
   opm/adjoint/AdjointSystemTranspose.hpp

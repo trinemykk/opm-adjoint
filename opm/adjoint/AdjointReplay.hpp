@@ -143,9 +143,11 @@ public:
             // checkpoints must be recomputed and supplied via
             // setSegmentArchive(). sourceArchive_() throws precisely where one
             // is missing, so this only has to say what the archive is.
-            OpmLog::info(fmt::format(
+            OpmLog::warning(fmt::format(
                 "Adjoint archive is checkpointed (stride {}): {} of {} substeps "
-                "carry no stored state and are recomputed during the sweep.",
+                "carry no stored state and are recomputed during the sweep. "
+                "This path is UNDER DEVELOPMENT - verified on SPE1/SPE9, serial, "
+                "fixed-step only.",
                 meta_.checkpointEvery,
                 std::count_if(meta_.substeps.begin(), meta_.substeps.end(),
                               [](const AdjointSubstepMeta& m)

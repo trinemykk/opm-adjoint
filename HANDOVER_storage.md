@@ -520,6 +520,43 @@ without. The section below is for the regimes that are *still* constrained.
 
 ---
 
+## 7b. Where checkpointing stands, and what it still needs (2026-07-27)
+
+**Judgement: checkpointing is not needed for the models this adjoint currently targets.** Compression
+alone brought full Norne to ~0.84 GB (1.05× one restart step), and the tracer trim and the material-law
+guard are still unspent. At Norne scale the archive is no longer the constraint, so the default stays
+`--adjoint-checkpoint-every=1` and both the recorder and the sweep warn when it is not.
+
+It **is** the only lever that scales, so it stays on the roadmap for larger models — 0.5–1 M cells with
+500–2000 substeps, where the compressed archive is 15–122 GB and per-snapshot size is floored by
+`model`'s 1.95× compression. What exists today works on SPE1/SPE9 (see §8 L1 STATUS) and is a usable
+foundation, not a finished feature.
+
+**What a field-ready version needs beyond what is there:**
+
+1. **Per-substep branch metadata — the discrete state, not just the continuous one.** The recompute has
+   to land on the *same branch* of the code the recording took. That means storing the enumerated
+   decisions per substep and bumping the schema version when they are added: realised well and group
+   control modes (`WellStatus`, `injection_cmode`, `production_cmode`, `Group::ProductionCMode` /
+   `InjectionCMode`), and the primary-variable meanings (`WaterMeaning`/`PressureMeaning`/`GasMeaning`,
+   which already ride along inside `model`). These are a handful of bytes per well per substep —
+   ~150 B/substep for Norne's 36 wells against 2.4 MB for a snapshot — and they buy two things at once:
+   the recompute can *seed* the right branch instead of rediscovering it by switching, and a discrete
+   mismatch afterwards is a **hard divergence guard needing no tolerance**, far sharper than comparing
+   Newton counts. The substep-0 failure above is exactly the class of bug this catches early.
+2. **Lossy-compressed warm-start values.** Store `float32` of the solution at every substep (~31 B/cell,
+   ~15 % of a snapshot) as the Newton initial guess. Newton then starts ~7 digits from the answer and
+   should converge in 1–2 iterations instead of 5–15, which is what turns Revolve's "3 extra forward
+   sweeps" into a fraction of one. Lossy is fine here: it is only a starting point, and the solve still
+   converges to full tolerance, so the state is accurate rather than `float32`-accurate.
+3. The rest of §8 L1/L2: Revolve scheduling, and deflating `AdjointMemStore` to reclaim the 3.72×
+   RAM-vs-disk asymmetry that makes segment RAM the binding constraint at scale.
+
+Both (1) and (2) change the Newton iterate path, so they trade bitwise reproduction for
+tolerance-bounded agreement — which must be *measured* against the M=1 reference, not assumed.
+
+---
+
 ## 8. Optimization plan for further reduction
 
 Nothing here is needed for Norne. The target regime is **0.5–1 M cells × 500–2000 substeps**,
@@ -566,7 +603,49 @@ correctness risk.
 >   `setEpisodeIndex`, before the solve. Inactive unless installed; the callback owns the whole
 >   restore including `prepareDeserialize` and IQ invalidation, as the OPMRST path does.
 >
-> **Next: `AdjointSegmentSource`** — restore `c_j` through the hook, `resetRecorder` onto a fresh
+> ### STATUS: works end-to-end on SPE1/SPE9. Shipped behind a warning, NOT the field path.
+>
+> `AdjointSegmentSource` re-runs the missing substeps from the preceding checkpoint and hands them to
+> the sweep. Equivalence against `--adjoint-checkpoint-every=1`:
+>
+> | deck | M | PV / TRANS / PERM | WELLCTRL | WELLCTRL_BYMODE |
+> |---|---|---|---|---|
+> | SPE9_CP_SHORT (21 substeps) | 3, 4, 100 | **byte-identical** | byte-identical | byte-identical |
+> | SPE1CASE1 | 3, 4, 100 | **byte-identical** | byte-identical | agrees to ~1e-12 |
+>
+> J is identical to all 17 digits on both decks at every M, and the recompute costs exactly one extra
+> forward pass (N substeps re-run, independent of M). The SPE1 `WELLCTRL_BYMODE` residue is 1.3e-12 to
+> 9.6e-12 relative — floating-point summation order, not a trajectory difference; note the per-well
+> totals in `WELLCTRL` are byte-identical, so it is the by-mode split that reassociates. The families
+> this project actually targets (PORO/PV, PERM, TRANS) are byte-identical on both decks.
+>
+> **Both the recorder and the sweep now log a warning** that this path is under development and
+> verified on SPE1/SPE9, serial, fixed-step only. `--adjoint-checkpoint-every` defaults to 1, so
+> nothing changes unless it is asked for. **Norne and np=2 are untested.**
+>
+> #### Two bugs found and fixed getting there
+>
+> 1. **Segment format.** The segment recorder took `slim` from the *sweeping* process's
+>    `--adjoint-slim` rather than from the recording, so a sweep invoked without the flag wrote a
+>    `simulator` blob while the reader wanted `model`/`problem` — surfacing as
+>    "missing dataset /adjoint/substep/20/model". It now takes the recorded `AdjointMeta` and matches
+>    its format, and forces `saveSystem` off since a recomputed substep has nothing to compare against.
+> 2. **Substep 0 could not be recomputed.** Gradients deviated 3.8e-4 in norm, *identically* for
+>    M = 2, 7 and 21 — the M-independence is what localized it. Per-substep replay residuals showed
+>    substeps 1..20 bitwise exact and **substep 0 at 1.782e+00 instead of 4.872e-09**: re-running the
+>    first report step from the `initial` snapshot does not reproduce `R(x_0, x_-1)`, because the
+>    snapshot that comes back has the wrong `x_{k-1}` slot. Since substep 1 was exact, the *solve* was
+>    right — only the stored history was wrong. Fixed by always checkpointing substep 0 (one extra
+>    snapshot out of N/M), and `AdjointSegmentSource` now starts each segment at its first genuinely
+>    missing substep and leads from the nearest stored one, so no segment leans on `initial`.
+>    The root cause of the `initial`-lead history slot is **not** diagnosed; it is avoided.
+>
+> A **pre-existing, unrelated crash** turned up while testing: passing both `--linear-solver=ilu0`
+> and `--matrix-add-well-contributions=true` segfaults in `Main`'s constructor (`initMPI` /
+> `opal_argv_join`) — the argv-injection block in `flow_adjoint.cpp` main mishandles options that are
+> already present. Either flag alone is fine. Worth fixing on its own.
+>
+> #### Design (for reference) — restore `c_j` through the hook, `resetRecorder` onto a fresh
 > in-memory archive, `FlowMain::executeStep()` for `(c_j, c_{j+1}]`, then `setSegmentArchive`, sweep,
 > `clearRecorder`. Two wrinkles found while designing it, not yet handled:
 > 1. **`runStep` writes ECL output** (`writeOutput(true)`, `_impl.hpp:466-472`) and the hook fires on

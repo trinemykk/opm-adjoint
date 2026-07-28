@@ -77,6 +77,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <string>
 #include <type_traits>
@@ -212,6 +213,20 @@ public:
     }
 
     //! \brief Evaluate the objective on the recorded final state only.
+    //! \brief Supply the states of substeps a checkpointed recording skipped.
+    //!
+    //! Called with the substep about to be replayed, before each replayStep, so
+    //! the provider can materialize the segment it belongs to. Set by the driver
+    //! (which owns the FlowMain needed to re-run the forward model); unset means
+    //! the archive is expected to hold every substep.
+    void setSegmentProvider(std::function<void(int)> provider)
+    { segmentProvider_ = std::move(provider); }
+
+    //! \brief The sweep's replay driver, so a segment provider can restore
+    //!        checkpoints through it and hand back recomputed segments.
+    Replay& replay()
+    { return replay_; }
+
     int evaluateObjectiveOnly()
     {
         const auto& meta = replay_.meta();
@@ -288,6 +303,13 @@ public:
         for (int k = numSubsteps - 1; k >= 0; --k) {
             double worstResidual = 0.0;
             double worstJacobian = 0.0;
+            // Under checkpointing the states of this substep may not be in the
+            // archive; the provider re-runs the forward model over the segment
+            // k belongs to and hands the result to replay_. A no-op when every
+            // substep was stored.
+            if (segmentProvider_) {
+                segmentProvider_(k);
+            }
             auto t0 = tick();
             if (!replay_.replayStep(k, worstResidual, worstJacobian)) {
                 ++replayFailures;
@@ -2104,6 +2126,8 @@ private:
     Simulator& simulator_;
     AdjointConfig config_;
     Replay replay_;
+    //! Supplies states for substeps the recording skipped; see setSegmentProvider.
+    std::function<void(int)> segmentProvider_{};
     AdjointParallel<TypeTag> parallel_;
     AdjointObjectiveFunction<TypeTag> objective_;
     AdjointLinearSolver<Matrix, Vector> linearSolver_;

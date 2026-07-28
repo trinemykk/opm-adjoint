@@ -73,18 +73,23 @@ public:
     //!        Non-zero for a segment recompute, whose local substep j is the
     //!        run's global substep offset+j — the sweep asks for groups by
     //!        global index, so the groups must be numbered that way.
-    //! \param segmentMode Recording a recomputed stretch rather than the
-    //!        forward run: every substep gets a payload (the sweep needs both k
-    //!        and k-1, so a segment must be fully materialized) and the
-    //!        configuration warnings are left to the original forward run.
+    //! \param recordedMeta Non-null puts the recorder in SEGMENT mode: it is
+    //!        recording a recomputed stretch rather than a forward run. Every
+    //!        substep then gets a payload (the sweep needs both k and k-1, so a
+    //!        segment must be fully materialized), the configuration warnings
+    //!        are left to the original forward run, and — importantly — the
+    //!        snapshot FORMAT is taken from the recording rather than from this
+    //!        process's parameters. A sweep does not have to be invoked with the
+    //!        same --adjoint-slim as the run it is differentiating, and the
+    //!        reader follows the recorded meta, so the segment must match it.
     AdjointRecorder(Simulator& simulator,
                     std::shared_ptr<AdjointArchive> injectedArchive,
                     int globalIndexOffset = 0,
-                    bool segmentMode = false)
+                    const AdjointMeta* recordedMeta = nullptr)
         : simulator_(simulator)
         , config_(AdjointConfig::fromParameters())
         , globalIndexOffset_(globalIndexOffset)
-        , segmentMode_(segmentMode)
+        , segmentMode_(recordedMeta != nullptr)
     {
         std::string path;
         if (injectedArchive) {
@@ -112,6 +117,15 @@ public:
             // A segment stores every substep it recomputes, whatever stride the
             // original recording used.
             meta_.checkpointEvery = 1;
+            // Match the recording's format, not this process's flags: the reader
+            // dispatches on the recorded meta.slim, and a sweep need not have
+            // been given the same --adjoint-slim as the forward run.
+            config_.slim = recordedMeta->slim;
+            meta_.slim = recordedMeta->slim;
+            // Verification dumps belong to the recording; a recomputed substep
+            // has nothing to compare against (see compareWithStored_).
+            config_.saveSystem = false;
+            meta_.systemSaved = false;
             return;   // no guards, no banner: this is not a fresh forward run
         }
 
@@ -303,10 +317,14 @@ private:
                           "events, so a recomputed report step would see a "
                           "different configuration than the recorded one.");
             }
-            OpmLog::info(fmt::format(
-                "Adjoint recording: checkpointing every {} substeps; the "
-                "substeps in between are recomputed during the backward sweep.",
-                meta_.checkpointEvery));
+            OpmLog::warning(fmt::format(
+                "Adjoint checkpointing (--adjoint-checkpoint-every={}) is UNDER "
+                "DEVELOPMENT. Storing every {}th substep and recomputing the "
+                "rest is verified on SPE1/SPE9 only, serial, fixed-step. It is "
+                "not needed for the model sizes this adjoint currently targets - "
+                "use the default (=1) unless you are deliberately trading "
+                "storage for forward compute on a large case.",
+                meta_.checkpointEvery, meta_.checkpointEvery));
         }
         if (Parameters::Get<Parameters::EnableDriftCompensation>()) {
             // Drift compensation adds an accumulated mass-balance correction to
@@ -367,7 +385,13 @@ private:
             return true;   // a segment must be fully materialized
         }
         const int m = meta_.checkpointEvery;
-        return m <= 1 || ((k + 1) % m) == 0;
+        // Substep 0 is always stored. Recomputing it means re-running the first
+        // report step from the `initial` snapshot, and the snapshot that comes
+        // back does not reproduce R(x_0, x_-1): its x_{k-1} slot is wrong, so
+        // the replayed residual is O(1) instead of ~1e-9 while every later
+        // substep is bitwise exact. Storing it costs one snapshot out of N/M and
+        // removes the only segment boundary that starts from `initial`.
+        return m <= 1 || k == 0 || ((k + 1) % m) == 0;
     }
 
     using Clock = std::chrono::steady_clock;

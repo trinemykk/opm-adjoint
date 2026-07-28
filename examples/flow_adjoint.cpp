@@ -48,6 +48,7 @@
 
 #include <opm/adjoint/AdjointConfigFile.hpp>
 #include <opm/adjoint/AdjointFlowProblem.hpp>
+#include <opm/adjoint/AdjointSegmentSource.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 #include <opm/adjoint/AdjointSolver.hpp>
 
@@ -161,7 +162,22 @@ public:
                 exitCode = replay.run();
             } else if (mode == "gradient") {
                 AdjointSolver<TypeTag> solver(*flowMain.getSimulatorPtr());
+                // A checkpointed archive is missing the substeps between
+                // checkpoints; the segment source re-runs them on this same
+                // flowMain, which is why the driver has to install it (the
+                // solver only holds the model Simulator, not the step driver).
+                AdjointSegmentSource<TypeTag> segments(flowMain, solver.replay());
+                solver.setSegmentProvider(
+                    [&segments](int k) { segments.ensureAvailable(k); });
                 exitCode = solver.run();
+                if (segments.segmentsRecomputed() > 0) {
+                    OpmLog::info(fmt::format(
+                        "Adjoint checkpoint recompute: {} segments, {} forward "
+                        "substeps re-run in {:.3f} s",
+                        segments.segmentsRecomputed(),
+                        segments.substepsRecomputed(),
+                        segments.recomputeSeconds()));
+                }
             } else { // "objective"
                 AdjointSolver<TypeTag> solver(*flowMain.getSimulatorPtr());
                 exitCode = solver.evaluateObjectiveOnly();
