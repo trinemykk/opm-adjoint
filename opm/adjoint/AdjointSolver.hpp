@@ -597,7 +597,7 @@ private:
     {
         using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
         const auto& eqns = stdWell.linSys();
-        const std::size_t numWellEq = eqns.Dmatrix()[0][0].N();
+        const std::size_t numWellEq = eqns.getD()[0][0].N();
         Dune::DynamicVector<Scalar> dJdxw(numWellEq, 0.0);
 
         if (objective_.kind() == Kind::WellBhp) {
@@ -649,7 +649,7 @@ private:
                           "MultisegmentWell only");
             }
             const auto& eqns = stdWell->linSys();
-            const auto& Dmat = eqns.Dmatrix()[0][0];
+            const auto& Dmat = eqns.getD()[0][0];
             const std::size_t numWellEq = Dmat.N();
 
             const auto dJdxw = wellObjectiveGradient_(*stdWell, dt);
@@ -665,7 +665,7 @@ private:
             Dt.solve(y, dJdxw);
 
             // rhs_cell += B[0][perf]^T y for all perforated cells.
-            const auto& Bmat = eqns.Bmatrix();
+            const auto& Bmat = eqns.getB();
             const auto& cells = stdWell->cells();
             for (auto colIt = Bmat[0].begin(); colIt != Bmat[0].end(); ++colIt) {
                 const std::size_t perfIdx = colIt.index();
@@ -702,12 +702,12 @@ private:
                 continue;
             }
             const auto& eqns = stdWell->linSys();
-            const auto& Dmat = eqns.Dmatrix()[0][0];
+            const auto& Dmat = eqns.getD()[0][0];
             const std::size_t numWellEq = Dmat.N();
 
             auto work = wellObjectiveGradient_(*stdWell, dt);
 
-            const auto& Cmat = eqns.Cmatrix();
+            const auto& Cmat = eqns.getC();
             const auto& cells = stdWell->cells();
             for (auto colIt = Cmat[0].begin(); colIt != Cmat[0].end(); ++colIt) {
                 const std::size_t perfIdx = colIt.index();
@@ -792,7 +792,7 @@ private:
     mswWellObjectiveGradient_(const MultisegmentWell<TypeTag>& msw, double dt)
     {
         using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
-        const auto& Dmat = msw.linSys().Dmatrix();
+        const auto& Dmat = msw.linSys().getD();
         const std::size_t numSeg = Dmat.N();
         const std::size_t numWellEq = Dmat[0][0].N();
         Dune::DynamicVector<Scalar> dJdxw(numSeg * numWellEq, 0.0);
@@ -828,7 +828,7 @@ private:
                                  double dt, Vector& rhs)
     {
         const auto& eqns = msw.linSys();
-        const auto& Dmat = eqns.Dmatrix();
+        const auto& Dmat = eqns.getD();
         const std::size_t numWellEq = Dmat[0][0].N();
 
         const auto dJdxw = mswWellObjectiveGradient_(msw, dt);
@@ -836,7 +836,7 @@ private:
             Dmat, dJdxw, static_cast<int>(numWellEq));
 
         // rhs_cell += B[seg][perf]^T y[seg] over all segments / perforations.
-        const auto& Bmat = eqns.Bmatrix();
+        const auto& Bmat = eqns.getB();
         const auto& cells = msw.cells();
         for (auto row = Bmat.begin(); row != Bmat.end(); ++row) {
             const std::size_t seg = row.index();
@@ -863,12 +863,12 @@ private:
                                  const MultisegmentWell<TypeTag>& msw)
     {
         const auto& eqns = msw.linSys();
-        const auto& Dmat = eqns.Dmatrix();
+        const auto& Dmat = eqns.getD();
         const std::size_t numWellEq = Dmat[0][0].N();
 
         auto work = mswWellObjectiveGradient_(msw, dt); // numSeg*numWellEq
 
-        const auto& Cmat = eqns.Cmatrix();
+        const auto& Cmat = eqns.getC();
         const auto& cells = msw.cells();
         for (auto row = Cmat.begin(); row != Cmat.end(); ++row) {
             const std::size_t seg = row.index();
