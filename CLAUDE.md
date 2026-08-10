@@ -42,11 +42,34 @@ exact-AD, one-sweep, MPI-parallel families. Plan order (see summary §4):
 ## Branches
 
 ```
-opm-adjoint     master        # the module (HEAD ab5163d)
-opm-simulators  adjoint-hooks  # master + 4 small accessor commits
-opm-tests       adjoint        # adjoint_tests/MODEL_*_DEBUG, SPE1_GRPCTRL
+opm-adjoint     parallel-cprt  # the module
+opm-simulators  adjoint-hooks  # upstream/master + ONE commit (half transmissibilities)
+opm-tests       adjoint        # adjoint_tests/MODEL_*_DEBUG, SPE1_GRPCTRL, NORNE_*_ADJSHORT*
+opm-common      adjoint        # == upstream/master, no local patches
+opm-grid        adjoint        # == upstream/master, no local patches
 ```
-`opm-common` / `opm-grid` stay on their normal branches.
+
+**Synced to upstream 2026-08-10.** Nearly the whole hook set was merged upstream, so
+the downstream patch set went from 13 commits to **1**: `flow: optionally store one-sided
+half transmissibilities`. Everything else the adjoint needs is now stock API.
+
+Upstream renamed several hooks during review — when re-syncing, expect this class of
+change and grep for the old names:
+
+| was (ours) | now (upstream) |
+|---|---|
+| `Bmatrix()` / `Cmatrix()` / `Dmatrix()` | `getB()` / `getC()` / `getD()` (both StandardWell and MSW) |
+| `assembleWellEqGivenControls` | `assembleWellEqAtRestoredState` |
+| `--convert-to-multisegment-well=true` | `=per-connection` (string, validated) |
+| `makeSimpleMultiSegmentWell` (in-place) | `makeMultiSegmentWellPerConnection` (returns the well) |
+
+Dropped as dead code: the `setAssemblySummaryState` seam — defined, never called, no
+consumer anywhere. Do not resurrect it without a caller.
+
+Rebase gotcha seen twice: `git rebase` **silently skipped** commits as "previously
+applied" on a false patch-id match when upstream had a *renamed* equivalent, once
+deleting files that were not actually upstream. Always check `git rev-list --count` and
+that the symbols still exist afterwards.
 
 ## Build
 
