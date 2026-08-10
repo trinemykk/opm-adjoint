@@ -4,3 +4,9 @@ build*/
 *~
 \#*\#
 .\#*
+
+# CMake build artifacts (compiler probes, ABI binaries) - never source
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Testing/
