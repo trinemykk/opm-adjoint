@@ -70,7 +70,7 @@ print('%.10e' % (abs(fd-adj)/max(abs(fd),abs(adj),1e-300)))
 }
 
 err_stw=$(run_model stw "")
-err_msw=$(run_model msw "--convert-to-multisegment-well=true")
+err_msw=$(run_model msw "--convert-to-multisegment-well=per-connection")
 echo "StandardWell  bhp:PROD  rel.err = $err_stw"
 echo "converted-MSW bhp:PROD  rel.err = $err_msw   (tol $MSW_TOL)"
 

@@ -292,7 +292,7 @@ public:
         // re-deriving the control/group/network/guide-rate state (which
         // does not reproduce the forward's converged values and crashes on
         // shut wells); recompute only the well primary variables.
-        wellModel_().assembleWellEqGivenControls(meta.dt);
+        wellModel_().assembleWellEqAtRestoredState(meta.dt);
         model_().linearizer().linearizeDomain();
 
         // Optional: validate the standalone evaluator against the

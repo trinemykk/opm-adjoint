@@ -1,6 +1,6 @@
 #!/bin/bash
 # Smoke test for the simple standard-well -> multisegment-well converter
-# (--convert-to-multisegment-well, opm-common makeSimpleMultiSegmentWell).
+# (--convert-to-multisegment-well, opm-common makeMultiSegmentWellPerConnection).
 #
 # Converting a plain standard-well deck must produce working MSW wells: the run
 # completes, no well is shut for non-convergence, and the field oil production
@@ -19,7 +19,7 @@ status=0
 
 $FLOW "$DECK" --output-dir="$OUT/stw" $COMMON > "$OUT/stw.log" 2>&1
 rc_stw=$?
-$FLOW "$DECK" --output-dir="$OUT/msw" $COMMON --convert-to-multisegment-well=true > "$OUT/msw.log" 2>&1
+$FLOW "$DECK" --output-dir="$OUT/msw" $COMMON --convert-to-multisegment-well=per-connection > "$OUT/msw.log" 2>&1
 rc_msw=$?
 
 if [ $rc_stw -ne 0 ] || [ $rc_msw -ne 0 ]; then

@@ -217,6 +217,67 @@ So Stage 1's keystone — a forward-neutral "assemble at restored controls"
 entry point fed by the full restored state — is in place and reproduces
 group-controlled **and** shut-well field decks.
 
+### Upstream review outcome (2026-07-29): renamed, and why the `updatePrimaryVariables` call is load-bearing
+
+Upstream PR [#7239](https://github.com/OPM/opm-simulators/pull/7239).
+
+**Rename — action required in this module.** `assembleWellEqGivenControls` is now
+**`assembleWellEqAtRestoredState`**. atgeirr's objection: it is the *complete*
+state that is assumed restored, not just the controls, and the name has to say
+the method is not for use during the forward process.
+
+Call site to update here:
+
+- `opm/adjoint/AdjointReplay.hpp:295` — `wellModel_().assembleWellEqGivenControls(meta.dt);`
+
+Docs still carrying the old name: `STATUS.md:26`, `HANDOVER_storage.md:745,784,824`,
+`adjoint_code_guide.md:409`, and §3a above (~165, ~198, ~210).
+
+**`updatePrimaryVariables()` is a *restore*, not a re-derivation.** Recorded
+because it is not obvious from the call site, and review queried whether it was
+needed here at all:
+
+- a converged step writes its primary variables into the well state —
+  `StandardWellPrimaryVariables::copyToWellState` does
+  `ws.primaryvar = value_; ws.bhp = value_[Bhp];`
+- `SingleWellState` **serializes** `primaryvar`, so they survive the snapshot
+- `StandardWellPrimaryVariables::update(well_state, …)` reads them back:
+  fractions from `ws.primaryvar` when non-empty, `Bhp` from `ws.bhp`
+- MSW does the same via `MultisegmentWellPrimaryVariables` (write ~:250, read ~:112)
+
+The call is therefore what pushes the restored snapshot into
+`primary_variables_`, and **it cannot be dropped**: upstream #7238 landed only
+*read* accessors (`primaryVariables()` returns `const&`), so this module has no
+way to write `primary_variables_` directly — the well state is the only route in.
+
+It also explains why this entry point has to exist rather than reusing
+`assemble()`: the forward control-update path throws those values away.
+`WellInterface::updateWellStateWithTarget` does `ws.primaryvar.resize(0)`, with
+the comment *"Discard old primary variables, the new well state may not be
+anywhere near the old one."*
+
+**⚠️ Open: `WQTotal` does not round-trip.** `ws.primaryvar` holds the whole value
+vector, `WQTotal` included, but `update()` **ignores the stored `WQTotal`** and
+recomputes it as `Σ scalingFactor(p) · surface_rates[p]`, forcing it to zero for
+a stopped or zero-rate-target well.
+
+So the restore is exact for **BHP and the phase fractions**, while the **total
+rate round-trips through surface rates**. If replayed gradients ever show small
+unexplained noise on rate-controlled wells, look here first. Not raised upstream
+— speculative until something actually shows it. A write accessor for
+`primary_variables_` would make the question moot.
+
+**Also checked.** `Bmatrix()/Cmatrix()/Dmatrix()` — dropped upstream in #7238 in
+favour of the pre-existing `getB()/getC()/getD()` — appear **only in
+`adjoint_testing.md`**, not in any code in this module. The solver uses
+`primaryVariables().getQs(...)` (`AdjointSolver.hpp:617,812`), which is
+unaffected. So that rename is a documentation fix here, not a code change.
+
+Separately, copilot noted that the shut-well behaviour attributed above to
+`prepareWellsBeforeAssembling` belongs to the per-well
+`prepareWellBeforeAssembling` it delegates to — the plural wrapper is just a
+loop. The conclusion in §3a stands; only the attribution is loose.
+
 ### 3b. The remaining inexact case folds into Stage 2: voidage-replacement control
 
 A stress test across opm-tests decks found one class that still does not
