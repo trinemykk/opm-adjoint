@@ -53,7 +53,7 @@ MODEL_1D_DEBUG, fixed report-step stepping, strict tolerances):
 | 2 | -4.7498e+03 | -4.7485e+03 | 2.8e-04 (FD-noise dominated) |
 
 ```bash
-cd ~/Documents/OPM/opm_clean/opm-adjoint
+cd ~/OPM_CLEAN/opm_adjoint/opm-adjoint
 ./tests/run-adjoint-fd-test.sh $BIN_MOD/flow_adjoint \
     $TESTS/adjoint_tests/MODEL_1D_DEBUG/inputfiles MODEL_1D_DEBUG /tmp/fdtest
 ```
@@ -419,8 +419,8 @@ adjoint-hooks addition, computeHalfTrans_ is private today), parts of
 adjoint-hooks when needed.
 
 ```bash
-BIN_MOD=~/Documents/OPM/opm_clean/builds/release/opm-adjoint
-cd ~/Documents/OPM/opm_clean/opm-adjoint
+BIN_MOD=~/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint
+cd ~/OPM_CLEAN/opm_adjoint/opm-adjoint
 ./tests/run-adjoint-replay-test.sh $BIN_MOD/flow_adjoint \
     $TESTS/spe1/SPE1CASE1.DATA /tmp/replay
 ```
@@ -497,7 +497,7 @@ Ninja, dune from `dune_installed_all`, configured with
 | `vscode_build` | Debug, clang | where the adjoint work was first developed and tested |
 
 ```bash
-cd ~/Documents/OPM/opm_clean/builds/release   # or builds/debug
+cd ~/OPM_CLEAN/opm_adjoint/builds/release   # or builds/debug
 ninja flow_blackoil test_AdjointStorage test_transposeMatrix
 ```
 Only `flow_blackoil` is needed for all forward/replay testing (fastest of
@@ -521,9 +521,9 @@ same way if you want `.h5` there too.
 
 Set for brevity:
 ```bash
-BIN=~/Documents/OPM/opm_clean/vscode_build/opm-simulators/bin
-TESTS=~/Documents/OPM/opm_clean/opm-tests
-SIM=~/Documents/OPM/opm_clean/opm-simulators
+BIN=~/OPM_CLEAN/opm_adjoint/builds/release/opm-simulators/bin
+TESTS=~/OPM_CLEAN/opm_adjoint/opm-tests
+SIM=~/OPM_CLEAN/opm_adjoint/opm-simulators
 ```
 
 ### T1 — storage/IO unit tests

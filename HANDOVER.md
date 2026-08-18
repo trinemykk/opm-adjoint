@@ -75,7 +75,7 @@ How it was isolated (skeptical, controlled — I was wrong twice, controls caugh
 
 ## Build / test / run
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release
 cmake --build . --target flow_adjoint -j8
 cd opm-adjoint && ctest              # fast suite; `-LE field` excludes the ~90s SPE9 demo
 ```

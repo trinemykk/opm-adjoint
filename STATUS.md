@@ -482,12 +482,12 @@ The module builds like any Dune/OPM module. The existing release tree is
 `builds/release` (Ninja, `CMAKE_BUILD_TYPE=Release`, parallel HDF5 + UMFPACK).
 
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release
 
 # (re)configure — only needed for a fresh tree
 cmake -G Ninja \
   -C ../cmake_minimal.cmake \
-  -DCMAKE_PREFIX_PATH=/Users/hnil/Documents/GITHUB/OPM/dune_installed_all \
+  -DCMAKE_PREFIX_PATH=/Users/hnil/OPM_CLEAN/deps/dune \
   -DCMAKE_BUILD_TYPE=Release \
   /path/to/opm-adjoint            # plus the other modules as usual
 
@@ -514,8 +514,8 @@ Producing `builds/release/opm-adjoint/flow_adjoint`.
 Set a convenience variable:
 
 ```bash
-FLOW=/Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint/flow_adjoint
-DECK=/Users/hnil/Documents/OPM/opm_clean/opm-tests/spe1/SPE1CASE1.DATA
+FLOW=/Users/hnil/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint/flow_adjoint
+DECK=/Users/hnil/OPM_CLEAN/opm_adjoint/opm-tests/spe1/SPE1CASE1.DATA
 ```
 
 ### 4a. Exact backward replay (Milestone A — verifies bitwise re-linearization)
@@ -545,7 +545,7 @@ time-stepping** so a parameter perturbation cannot change the substep sequence (
 would swamp any FD comparison):
 
 ```bash
-DECK=/Users/hnil/Documents/OPM/opm_clean/opm-tests/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
+DECK=/Users/hnil/OPM_CLEAN/opm_adjoint/opm-tests/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
 OUT=/tmp/spe1grp
 mkdir -p $OUT
 
@@ -577,7 +577,7 @@ Objectives: `--adjoint-objective=pressure-average | bhp:<WELL> | matchref:<ref>:
 ### 4c. Run the test suite
 
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint
 ctest                      # 15/15, ~30 s
 ctest -R adjoint_fd        # just the FD-vs-adjoint gradient checks
 ```

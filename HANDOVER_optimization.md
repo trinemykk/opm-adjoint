@@ -54,7 +54,7 @@ to matter.
 
 ## Build / measure
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release && cmake --build . --target flow_adjoint -j8
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release && cmake --build . --target flow_adjoint -j8
 ```
 Measure max RSS with `/usr/bin/time -l` (macOS). Timing breakdowns print to the .DBG/.PRT at the end
 of gradient runs. Use `--enable-adaptive-time-stepping=false --enable-storage-cache=false

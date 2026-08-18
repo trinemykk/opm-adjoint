@@ -74,7 +74,7 @@ that the symbols still exist afterwards.
 ## Build
 
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release
 cmake --build . --target flow_adjoint -j8
 ```
 Release tree: Ninja, `CMAKE_BUILD_TYPE=Release`, parallel HDF5 + UMFPACK. Produces
@@ -87,7 +87,7 @@ Release tree: Ninja, `CMAKE_BUILD_TYPE=Release`, parallel HDF5 + UMFPACK. Produc
 ## Run (see STATUS.md §4 for full recipes)
 
 ```bash
-FLOW=/Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint/flow_adjoint
+FLOW=/Users/hnil/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint/flow_adjoint
 # forward + record, then backward sweep:
 $FLOW $DECK --output-dir=$OUT --adjoint-file=$OUT/a --adjoint-save=true   $STRICT
 $FLOW $DECK --output-dir=$OUT --adjoint-file=$OUT/a --adjoint-mode=gradient $STRICT
@@ -100,7 +100,7 @@ Objectives: `--adjoint-objective=pressure-average|bhp:W|rate:W:p|match…|matchr
 ## Test
 
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint
 ctest              # 28/28, ~30 s
 ctest -R adjoint_fd   # just the FD-vs-adjoint gradient checks
 ```

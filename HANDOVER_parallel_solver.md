@@ -13,7 +13,7 @@ performance thread (`HANDOVER_optimization.md`, auto-memory `adjoint-performance
 1. Auto-memory `adjoint-performance-optimization` — what the serial optimization did and
    the current sweep profile (serial Norne sweep 8.9 s = 0.62× forward, linearly scaling).
 2. `STATUS.md` "Memory & performance" — updated 2026-07-25.
-3. This machine's MPI build: `~/Documents/OPM/opm_docs/00-build-and-run/build_opm.md`
+3. This machine's MPI build: `~/OPM_CLEAN/opm_docs/build/toolchain.md`
    (Open MPI 5.0.9 brew; the release tree is MPI-capable — `HAVE_MPI` is a compile flag,
    not a `config.h` entry, and `flow_adjoint` links `libmpi`).
 
@@ -128,7 +128,7 @@ serial `cprt` path, which is the proven template.
 ## Build / run / measure
 
 ```bash
-cd /Users/hnil/Documents/OPM/opm_clean/builds/release && cmake --build . --target flow_adjoint -j8
+cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release && cmake --build . --target flow_adjoint -j8
 FLOW=$PWD/opm-adjoint/flow_adjoint
 DECK=$PWD/../../opm-tests/norne/NORNE_ATW2013_ADJSHORT_CLEAN.DATA
 STRICT="--threads-per-process=1 --enable-storage-cache=false --enable-adaptive-time-stepping=false --adjoint-objective=pressure-average"
