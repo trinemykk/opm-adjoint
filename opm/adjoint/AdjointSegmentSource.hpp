@@ -161,13 +161,39 @@ private:
         // happens (after the episode is set up, before the solve). One-shot:
         // the hook fires on every report step, but only the first must be
         // preloaded — the rest continue from the recomputed trajectory.
+        auto& simulator = *flowMain_.getSimulatorPtr();
         bool restored = false;
-        driver->setRestoreStateHook([this, lead, &restored](int /*reportStep*/) {
+        driver->setRestoreStateHook(
+            [this, lead, &restored, &problem, &simulator](int reportStep) {
             if (restored) {
                 return;
             }
             restored = true;
             replay_.loadSnapshot(lead, this->reportStepFor_(lead));
+
+            // Re-establish the episode for the step about to be solved.
+            //
+            // runStep sets the episode up BEFORE firing this hook, but
+            // loadSnapshot restores a whole simulator snapshot, and that
+            // snapshot carries the CHECKPOINT's episode index and its well
+            // container sizing (via prepareDeserialize). Left alone, the step
+            // is then solved -- and recorded -- against the checkpoint's
+            // episode: on Norne, where a well opens mid-segment, the recompute
+            // writes substep 16 with the 6-well state of report step 15, and
+            // the next replay read fails with "Error deserializing WellState:
+            // size mismatch".
+            //
+            // This is the same restore-then-reset-episode sequence
+            // AdjointReplay::replayStep performs for exactly the same reason.
+            // beginEpisode() is safe to call again here: the recorder latches
+            // are already set by resetRecorder(), and substepInEpisode_ = 0 is
+            // correct since no substep of this episode has been recorded yet.
+            const auto& schedule = simulator.vanguard().schedule();
+            simulator.startNextEpisode(simulator.startTime() +
+                                           schedule.seconds(reportStep),
+                                       schedule.stepLength(reportStep));
+            simulator.setEpisodeIndex(reportStep);
+            problem.beginEpisode();
         });
 
         auto* timer = flowMain_.getSimTimer();

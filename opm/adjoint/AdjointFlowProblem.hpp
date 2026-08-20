@@ -171,9 +171,39 @@ public:
         }
     }
 
+    //! \brief End-of-step hook; skips the summary/action pass while a segment
+    //!        is being recomputed.
+    //!
+    //! FlowProblemBlackoil::endTimeStep() is
+    //!
+    //!     FlowProblem::endTimeStep(); this->endStepApplyAction();
+    //!
+    //! and endStepApplyAction() evaluates the summary state, which for a deck
+    //! with WPAVE drives ParallelWBPCalculation. Its source-evaluator factory is
+    //! bound to the well container built at the start of the run; a checkpoint
+    //! restore replaces the well state underneath it, and the next summary
+    //! evaluation dereferences the stale binding — a segfault inside
+    //! BlackoilWellModelWBP::computeWellBlockAveragePressures(). SPE1/SPE9 have
+    //! no WPAVE and never hit it; Norne does.
+    //!
+    //! A recompute exists only to regenerate states the sweep reads. Its summary
+    //! output is discarded anyway (writeOutput() above already suppresses the
+    //! ECL write for the same reason), so the whole pass is skipped by calling
+    //! the grandparent directly. Outside a segment this is exactly
+    //! ParentType::endTimeStep() as before.
+    //!
+    //! Note this also skips ACTIONX evaluation during a recompute. The forward
+    //! run already applied any actions, and the recompute follows the recorded
+    //! schedule; a deck whose actions fire *inside* a recomputed segment would
+    //! need them replayed, which is the same ACTIONX limitation the slim format
+    //! already documents.
     void endTimeStep() override
     {
-        ParentType::endTimeStep();
+        if (rerunning_) {
+            FlowProblem<TypeTag>::endTimeStep();
+        } else {
+            ParentType::endTimeStep();
+        }
         if (recorder_) {
             const auto& simulator = this->simulator();
             recorder_->recordSubstep(simulator.time(),
