@@ -312,6 +312,8 @@ int main(int argc, char** argv)
         args.push_back(opt.data());
     }
     int newArgc = static_cast<int>(args.size());
+    // MPI_Init walks argv to its terminator; without it Open MPI's singleton init segfaults.
+    args.push_back(nullptr);
     char** newArgv = args.data();
 
     auto mainObject = std::make_unique<Opm::AdjointMain>(newArgc, newArgv);

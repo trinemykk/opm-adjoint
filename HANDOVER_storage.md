@@ -26,8 +26,8 @@ Fixed by replacing both occurrences with `OPM_HDF5_AFTER_1_8`
 (`H5_VERS_MAJOR > 1 || H5_VERS_MINOR > 8`) plus a `size > 0` guard before `H5Pset_chunk`
 (a zero chunk dimension is an error, and parallel runs legitimately produce empty per-rank
 datasets). The same stale guard also selected the pre-1.10 `H5Gget_objinfo` branch in
-`groupExists`. **This affects every OPM HDF5 restart file on HDF5 2.x — worth an upstream
-PR on its own.**
+`groupExists`. **Upstreamed as OPM/opm-simulators#7233 (merged 2026-07-29)**; any older
+opm-simulators on HDF5 2.x still writes uncompressed files.
 
 ### Measured effect (Norne, 44 431 cells, 24 report steps, `NORNE_ATW2013_ADJSHORT*`)
 
