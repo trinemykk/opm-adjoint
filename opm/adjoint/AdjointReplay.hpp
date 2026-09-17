@@ -116,9 +116,11 @@ public:
                       "--enable-drift-compensation=false.");
         }
 
-        std::string path = "(in-memory, one-stop)";
+        std::string path;
         if (injectedArchive) {
             archive_ = std::move(injectedArchive);
+            // One-stop injects either the RAM store or a disk archive.
+            path = archive_->path();
         } else {
             path = config_.path;
             if (path.empty()) {

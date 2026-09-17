@@ -221,6 +221,7 @@ public:
     //!             reads back exactly the local partition it wrote.
     explicit AdjointArchive(const std::string& path, Mode mode,
                             Parallel::Communication comm = Parallel::Communication{})
+        : path_(path)
     {
         if (isHdf5Path(path)) {
 #if HAVE_HDF5
@@ -256,6 +257,7 @@ public:
     {
         auto a = std::shared_ptr<AdjointArchive>(new AdjointArchive());
         a->mem_ = std::make_unique<AdjointMemStore>();
+        a->path_ = "(in-memory)";
         return a;
     }
 
@@ -333,8 +335,24 @@ public:
 
     bool inMemory() const { return static_cast<bool>(mem_); }
 
+    //! \brief Archive path as given, or "(in-memory)" for the RAM backend.
+    //!        Lets an injected archive report itself in log messages instead of
+    //!        the caller assuming one-stop means in-memory.
+    const std::string& path() const { return path_; }
+
+    //! \brief Backend name for log messages.
+    std::string backendTag() const
+    {
+        if (mem_) {
+            return "in-memory";
+        }
+        return usesHdf5() ? "HDF5" : "directory store";
+    }
+
 private:
     AdjointArchive() = default;  //!< in-memory backend via makeInMemory()
+
+    std::string path_;
 
 #if HAVE_HDF5
     std::unique_ptr<HDF5Serializer> hdf5_;

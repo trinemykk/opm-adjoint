@@ -42,16 +42,15 @@ exact-AD, one-sweep, MPI-parallel families. Plan order (see summary §4):
 ## Branches
 
 ```
-opm-adjoint     parallel-cprt  # the module
-opm-simulators  adjoint-hooks  # upstream/master + ONE commit (half transmissibilities)
-opm-tests       adjoint        # adjoint_tests/MODEL_*_DEBUG, SPE1_GRPCTRL, NORNE_*_ADJSHORT*
-opm-common      adjoint        # == upstream/master, no local patches
-opm-grid        adjoint        # == upstream/master, no local patches
+opm-adjoint     master   # the module
+opm-simulators  master   # upstream/master (+ local fmt include fix until upstreamed)
+opm-common      master   # upstream/master
+opm-grid        master   # upstream/master
+opm-tests       adjoint  # hnil/opm-tests: OPM master + adjoint_tests/, NORNE_*_ADJSHORT*
 ```
 
-**Synced to upstream 2026-08-10.** Nearly the whole hook set was merged upstream, so
-the downstream patch set went from 13 commits to **1**: `flow: optionally store one-sided
-half transmissibilities`. Everything else the adjoint needs is now stock API.
+**Synced to upstream 2026-09-17.** The last downstream patch (half transmissibilities) was
+merged upstream as PR #7237, so the adjoint builds against stock master; 52/52 ctests pass.
 
 Upstream renamed several hooks during review — when re-syncing, expect this class of
 change and grep for the old names:
@@ -94,6 +93,15 @@ $FLOW $DECK --output-dir=$OUT --adjoint-file=$OUT/a --adjoint-mode=gradient $STR
 # STRICT = --enable-storage-cache=false --enable-adaptive-time-stepping=false \
 #          --threads-per-process=1 --tolerance-cnv=1e-9 --tolerance-mb=1e-11
 ```
+Or everything in ONE process (forward + sweep + gradients + J), tape on disk:
+```bash
+$FLOW $DECK --output-dir=$OUT --adjoint-mode=onestop --adjoint-file=$OUT/tape.h5 $STRICT
+```
+Drop `--adjoint-file` for the in-RAM tape (small cases only: the memory store is
+undeflated, ~230 B/cell/substep resident). One-stop refuses
+`--adjoint-checkpoint-every>1` and does not work under MPI (pre-existing `bad_alloc`
+in the second `FlowMain`, both media) — use the two-run path in parallel.
+
 Gradient methods: `--adjoint-gradient-method=analytic|general|general-ad`.
 Objectives: `--adjoint-objective=pressure-average|bhp:W|rate:W:p|match…|matchref…|matchsum…`.
 

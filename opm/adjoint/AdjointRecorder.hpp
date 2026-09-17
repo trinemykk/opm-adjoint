@@ -94,7 +94,9 @@ public:
         std::string path;
         if (injectedArchive) {
             archive_ = std::move(injectedArchive);
-            path = "(in-memory, one-stop)";
+            // One-stop injects either the RAM store or a disk archive, so ask
+            // the archive rather than assuming.
+            path = archive_->path();
         } else {
             path = config_.path;
             if (path.empty()) {
@@ -130,8 +132,8 @@ public:
         }
 
         checkConfiguration_();
-        const char* backend = archive_->inMemory() ? "" :
-                              (archive_->usesHdf5() ? " (HDF5)" : " (directory store)");
+        const std::string backend =
+            archive_->inMemory() ? "" : (" (" + archive_->backendTag() + ")");
         OpmLog::info("Adjoint recording enabled; archive: " + path + backend);
         if (config_.slim) {
             OpmLog::info("Adjoint slim archive: per-substep snapshots omit the "

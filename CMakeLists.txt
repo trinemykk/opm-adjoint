@@ -320,6 +320,13 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-onestop-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/onestop_spe1)
+    # One-stop with --adjoint-file: same single process, but the tape streams to
+    # disk instead of staying resident. Byte-identical to both the in-memory
+    # one-stop and the two-process run, for the HDF5 and directory backends.
+    add_test(NAME adjoint_onestop_disk_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-onestop-disk-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/onestop_disk_spe1)
     # Multisegment-well tests: MSW records + reservoir gradients work, and the
     # MSW well-adjoint (task #16) makes well objectives (bhp/rate) run and
     # FD-verify. The smoke test guards the plumbing; the fd test guards accuracy

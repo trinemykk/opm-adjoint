@@ -51,6 +51,23 @@ in-RAM, minimal footprint, byte-identical. shared_ptr archive ctors on
 Recorder/Replay/Solver; `AdjointFlowProblem::oneStopArchive()` injects it into
 the forward recorder.
 
+**One-stop with a disk archive (2026-08-18).** `--adjoint-mode=onestop
+--adjoint-file=<path>` keeps the single process but streams the tape to disk
+instead of holding it in RAM: the forward leg opens the archive for writing, the
+sweep reopens it read-only. Both backends (`.h5`/`.hdf5` → HDF5, otherwise the
+directory store), gradients + objective + field output unchanged. This is the
+field configuration — one simulator initialization *and* ~forward memory —
+because the in-memory store is undeflated (~230 B/cell/substep resident), which
+caps the RAM variant well below field size. Byte-identical to both the in-memory
+one-stop and the two-process run on SPE1 (PV/TRANS/PERM/WELLCTRL_BYMODE and J,
+both backends), gated by `adjoint_onestop_disk_spe1`. SPE9 (9 000 cells, 21
+substeps): max RSS **241 → 189 MiB**, wall clock 2.70 → 2.86 s; the saving is the
+tape, so it grows with cells × substeps. Two limits: `--adjoint-checkpoint-every>1`
+is refused in one-stop (only the two-run path installs the segment-recompute
+driver), and one-stop **aborts under MPI** — a pre-existing `std::bad_alloc` in
+the second `FlowMain`, present on the in-memory path too, so parallel runs still
+use the two-process path.
+
 ### Slim archive (`--adjoint-slim=true`)
 
 The per-substep snapshot serialized the full Eclipse Schedule (via the

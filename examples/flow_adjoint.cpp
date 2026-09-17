@@ -48,9 +48,11 @@
 
 #include <opm/adjoint/AdjointConfigFile.hpp>
 #include <opm/adjoint/AdjointFlowProblem.hpp>
+#include <opm/adjoint/AdjointParameters.hpp>
 #include <opm/adjoint/AdjointSegmentSource.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 #include <opm/adjoint/AdjointSolver.hpp>
+#include <opm/adjoint/AdjointStorage.hpp>
 
 #include <cstring>
 #include <memory>
@@ -113,8 +115,15 @@ public:
         return exitCode;
     }
 
-    //! \brief One-stop: forward record + backward sweep in a single process,
-    //!        sharing the states through an in-memory archive (no files).
+    //! \brief One-stop: forward record + backward sweep (gradients and the
+    //!        objective) in a single process, sharing one archive.
+    //!
+    //! The tape lives in RAM by default — no files, but the whole tape is
+    //! resident (~230 B/cell/substep, undeflated), which caps the model size.
+    //! `--adjoint-file=<path>` puts it on disk instead: the forward leg streams
+    //! snapshots out as it goes, the sweep reopens the archive read-only. That
+    //! keeps the resident set at ~forward memory and still costs only one
+    //! simulator initialization, which is the field-scale configuration.
     template<class TypeTag>
     int runOneStop()
     {
@@ -122,9 +131,27 @@ public:
         if (!initialize_<TypeTag>(exitCode)) {
             return exitCode;
         }
-        auto archive = AdjointArchive::makeInMemory();
+        // initialize_ has parsed the parameters, so the archive medium can be
+        // decided here — before the forward leg builds its recorder.
+        const auto config = AdjointConfig::fromParameters();
+        const bool onDisk = !config.path.empty();
+        if (config.checkpointEvery > 1) {
+            // The sweep would need a segment-recompute driver for the substeps
+            // between checkpoints; only runReplay installs one. Refuse up front
+            // instead of failing mid-sweep as a missing dataset.
+            OPM_THROW(std::runtime_error,
+                      "--adjoint-mode=onestop does not support "
+                      "--adjoint-checkpoint-every>1. Record and sweep as two "
+                      "runs (--adjoint-save=true, then --adjoint-mode=gradient), "
+                      "which drives the segment recompute.");
+        }
+        auto archive = onDisk
+            ? std::make_shared<AdjointArchive>(config.path,
+                                               AdjointArchive::Mode::Write,
+                                               FlowGenericVanguard::comm())
+            : AdjointArchive::makeInMemory();
         {
-            // Forward run records into the shared in-memory archive.
+            // Forward run records into the shared archive.
             AdjointFlowProblem<TypeTag>::oneStopArchive() = archive;
             this->setupVanguard();
             FlowMain<TypeTag> flowMain(argc_, argv_, outputCout_, outputFiles_);
@@ -133,6 +160,17 @@ public:
             if (exitCode != EXIT_SUCCESS) {
                 return exitCode;
             }
+        }
+        // The recorder released its reference in finalizeOutput() and the
+        // forward FlowMain is out of scope, so this is the last one.
+        if (onDisk) {
+            // Reopen read-only: the write handle must be closed first (HDF5
+            // holds the file open, and the meta dataset is only complete once
+            // the recorder has finalized).
+            archive.reset();
+            archive = std::make_shared<AdjointArchive>(
+                config.path, AdjointArchive::Mode::Read,
+                FlowGenericVanguard::comm());
         }
         // Backward sweep: fresh production setup (no time loop), reading the
         // states from the shared archive still held here.
