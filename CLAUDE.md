@@ -43,14 +43,13 @@ exact-AD, one-sweep, MPI-parallel families. Plan order (see summary §4):
 
 ```
 opm-adjoint     master   # the module
-opm-simulators  master   # upstream/master (+ local fmt include fix until upstreamed)
+opm-simulators  master   # upstream/master
 opm-common      master   # upstream/master
 opm-grid        master   # upstream/master
 opm-tests       adjoint  # hnil/opm-tests: OPM master + adjoint_tests/, NORNE_*_ADJSHORT*
 ```
 
-**Synced to upstream 2026-09-17.** The last downstream patch (half transmissibilities) was
-merged upstream as PR #7237, so the adjoint builds against stock master; 52/52 ctests pass.
+**Synced to upstream 2026-09-17**: builds against stock master, 52/52 ctests pass.
 
 Upstream renamed several hooks during review — when re-syncing, expect this class of
 change and grep for the old names:
