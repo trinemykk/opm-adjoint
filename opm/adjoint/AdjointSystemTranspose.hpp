@@ -59,7 +59,7 @@
 #include <opm/simulators/linalg/system/SystemTypes.hpp>
 #include <opm/simulators/linalg/system/WellMatrixMerger.hpp>
 
-#include <opm/grid/utility/SparseTable.hpp>
+#include <opm/common/utility/SparseTable.hpp>
 
 #include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>

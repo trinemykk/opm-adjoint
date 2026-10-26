@@ -134,7 +134,7 @@ public:
     //! \brief Set theta(cell) = original + delta (delta = 0 restores).
     void apply(unsigned cell, const EndpointParamDef<Scalar>& def, Scalar delta)
     {
-        auto& manager = *problem_.materialLawManager();
+        auto& manager = problem_.materialLawManager();
         auto info = manager.oilWaterScaledEpsInfoDrainage(cell); // copy
         info.*def.field += delta;
 
