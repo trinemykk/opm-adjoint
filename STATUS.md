@@ -21,10 +21,9 @@ decks up to field models, and is guarded by a ctest suite (52 tests).
   built against a **near-stock `opm-simulators`**. Recording hooks live in a derived
   `AdjointFlowProblem` (virtual `beginEpisode`/`endTimeStep`); the backward replay/solver
   driver uses only public simulator APIs. Branch `master`, HEAD `b231773`.
-- **`opm-simulators`** — branch `adjoint-hooks` (master + a handful of small accessor
-  commits: `B/C/D` getters on `StandardWellEquations`, a `SummaryState` assembly seam,
-  half-trans exposure on `Transmissibility`, `assembleWellEqGivenControls`). HEAD
-  `9b07194fe`.
+- **`opm-simulators`** — plain `master`. The few accessors the module needs (well
+  `B/C/D` getters, half-transmissibilities, `assembleWellEqAtRestoredState`, mutable
+  `wellIndex()`) are merged upstream; see `adjoint_code_guide.md` §10.
 - **`opm-tests`** — plain `master` (SPE1/SPE9 decks). The adjoint-specific decks
   (`MODEL_*_DEBUG`, `SPE1_GRPCTRL`, `DEEPWELL`) ship with the module in `doc/tutorials/`.
 
@@ -563,18 +562,9 @@ where the replay itself is not bitwise — the voidage case is the
 ## 2. Checkout
 
 The OPM module repos sit side by side in one directory (called `$OPM` below, e.g.
-`~/OPM`), each with its own `build/` folder. The adjoint work lives on two
-non-default branches:
-
-```bash
-# opm-simulators: small accessor hooks on top of master
-git -C opm-simulators checkout adjoint-hooks
-
-# opm-adjoint: the module itself (default branch)
-git -C opm-adjoint checkout master
-```
-
-`opm-common`, `opm-grid` and `opm-tests` stay on their normal branches. The
+`~/OPM`), each with its own `build/` folder. All OPM modules — opm-common, opm-grid,
+opm-simulators and opm-tests — are on their normal `master` branch; opm-adjoint itself
+is on `master` too. The
 adjoint-specific test decks are in `opm-adjoint/doc/tutorials/` (see its README); the
 SPE1/SPE9 tests use the standard opm-tests decks and are skipped if opm-tests is
 missing. `opm-adjoint/dune.module`
@@ -667,19 +657,20 @@ DECK=$OPM/opm-adjoint/doc/tutorials/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
 OUT=/tmp/spe1grp
 mkdir -p $OUT
 
-STRICT="--enable-storage-cache=false --enable-adaptive-time-stepping=false \
-        --threads-per-process=1 --tolerance-cnv=1e-9 --tolerance-mb=1e-11 \
-        --adjoint-objective=pressure-average"
+# an array, so the flags split into separate words in both bash and zsh
+STRICT=(--enable-storage-cache=false --enable-adaptive-time-stepping=false
+        --threads-per-process=1 --tolerance-cnv=1e-9 --tolerance-mb=1e-11
+        --adjoint-objective=pressure-average)
 
 # 1) forward + record
-$FLOW $DECK --output-dir=$OUT $STRICT --adjoint-file=$OUT/a --adjoint-save=true
+$FLOW $DECK --output-dir=$OUT "${STRICT[@]}" --adjoint-file=$OUT/a --adjoint-save=true
 
 # 2) backward sweep -> dJ/d(porosity multiplier) per cell
-$FLOW $DECK --output-dir=$OUT $STRICT --adjoint-file=$OUT/a --adjoint-mode=gradient
+$FLOW $DECK --output-dir=$OUT "${STRICT[@]}" --adjoint-file=$OUT/a --adjoint-mode=gradient
 #   => $OUT/<CASE>.ADJOINT_GRADIENTS_PV.txt
 
 # 3) (optional) just the objective value, e.g. for an FD check
-$FLOW $DECK --output-dir=$OUT $STRICT --adjoint-file=$OUT/a --adjoint-mode=objective
+$FLOW $DECK --output-dir=$OUT "${STRICT[@]}" --adjoint-file=$OUT/a --adjoint-mode=objective
 #   => log line "Adjoint objective J = ..."
 ```
 
@@ -800,7 +791,7 @@ the storage cache is enabled, more than 1 thread is used, or system dumps are di
 ## 5. Where to read more
 
 - `adjoint_code_guide.md` — code-reading guide: source reading order, backward-sweep
-  data flow, gradient mechanisms, opm-simulators hook list.
-- `adjoint_plan.md` — full design rationale, literature and PR sequencing.
+  data flow, gradient mechanisms, opm-simulators hook list; §13 has the milestones,
+  test ladder and literature.
 - `tests/FD_ACCURACY.md` — adjoint-vs-FD accuracy as a function of the FD step.
 - `doc/tutorials/README.md` — the adjoint test decks shipped with the module.

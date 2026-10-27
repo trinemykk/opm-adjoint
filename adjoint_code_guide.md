@@ -15,8 +15,8 @@ This document is the answer to two questions:
 
 For **status / what-works / how-to-run**, read [`STATUS.md`](STATUS.md) instead — this
 guide deliberately does not duplicate the objective/derivative tables or the run
-recipes. For **why decisions were made** and dead ends already tried, read
-[`adjoint_plan.md`](adjoint_plan.md) and the `adjoint-project-state` auto-memory.
+recipes. For **why decisions were made** — milestones, run rules, test ladder,
+literature — see [§13 Background](#13-background--milestones-run-rules-test-ladder-literature).
 
 ---
 
@@ -30,8 +30,8 @@ adjoint** of the blackoil forward simulation. It is a separate downstream OPM mo
 (the `opm-flowgeomechanics` pattern) that builds against a **near-stock
 `opm-simulators`**: all forward-run recording is done through virtual-lifecycle
 overrides in a derived problem class, and the backward sweep uses only public
-simulator APIs plus a handful of small accessor commits on the `adjoint-hooks` branch
-(see [§10](#10-the-opm-simulators-hooks)).
+simulator APIs plus a handful of small accessors that are merged into opm-simulators
+master (see [§10](#10-the-opm-simulators-hooks)).
 
 ## 2. The math, just enough to read the code
 
@@ -394,25 +394,24 @@ and the JSON loader ([`AdjointConfigFile.hpp`](opm/adjoint/AdjointConfigFile.hpp
 
 ## 10. The opm-simulators hooks
 
-The module is *near*-stock: it needs a small set of accessor commits on the
-`opm-simulators` **`adjoint-hooks`** branch (master + these, HEAD `9b07194fe`). Keep this
-list current — it is the module's entire coupling to upstream:
+The module builds against stock opm-simulators `master`. The accessors it needs were
+added upstream for this work and are all merged. Keep this list current — it is the
+module's entire coupling to upstream beyond public simulator APIs:
 
-1. `B/C/D` getters on `StandardWellEquations` (expose the well Jacobian blocks for the
-   Schur elimination and `λ_w` recovery).
-2. A `SummaryState` **assembly seam** on `WellInterface` (`assemblySummaryState` /
-   `setAssemblySummaryState`) — Stage-2 keystone routing the assembly's control
-   derivation through a settable pointer (default = live summaryState; byte-identical
-   forward).
-3. Half-transmissibility exposure on `Transmissibility` (`setStoreHalfTrans`) — for the
-   permeability chain rule.
-4. `BlackoilWellModel::assembleWellEqGivenControls(dt)` — assembles the well residual
-   from **restored** controls without re-deriving them (the replay's final linearization
-   uses this so group-controlled and shut-well decks replay without re-running the
-   forward-only control advance).
-5. Mutable `WellInterfaceGeneric::wellIndex()` — for the `dCTF/dperm` perturbation.
+1. `getB/getC/getD` on `StandardWellEquations` (via `StandardWell::linSys()`) — the well
+   Jacobian blocks for the Schur elimination and `λ_w` recovery (`AdjointSolver.hpp`).
+2. Half-transmissibility exposure on `Transmissibility` (`setStoreHalfTrans`) — for the
+   permeability chain rule (`AdjointFlowProblem.hpp`).
+3. `BlackoilWellModel::assembleWellEqAtRestoredState(dt)` — assembles the well residual
+   from the **restored** controls without re-deriving them, so group-controlled and
+   shut-well decks replay without re-running the forward-only control advance
+   (`AdjointReplay.hpp`).
+4. Mutable `WellInterfaceGeneric::wellIndex()` — for the `dCTF/dperm` perturbation
+   (`AdjointSolver.hpp`).
 
-`opm-common` and `opm-grid` stay on their normal branches.
+The `SummaryState` assembly seam of the earlier `adjoint-hooks` branch is not used by
+the module (it was meant for the not-yet-implemented `WellAssemblyState` Stage-2 fix).
+`opm-common` and `opm-grid` need no changes.
 
 ## 11. Known approximations — where they live in the code
 
@@ -447,6 +446,134 @@ This file is intended to be edited alongside the code. Practical rules:
   make a substantive pass.
 
 Related docs (do not duplicate them here): [`STATUS.md`](STATUS.md) (status, run
-recipes, explicitly-updated-quantities table), [`adjoint_plan.md`](adjoint_plan.md)
-(design rationale + PR sequencing),
+recipes, explicitly-updated-quantities table),
 [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md).
+
+---
+
+## 13. Background — milestones, run rules, test ladder, literature
+
+Kept from the original design plan (June 2026, H. M. Nilsen); the full plan with the
+assessment of the 2019 prototype, PR sequencing and risk list is in git history
+(`git show 677987d:adjoint_plan.md`).
+
+### 13.1 Milestones
+
+STATUS.md reports progress against these:
+
+- **Milestone A — exact backward replay:** re-create every recorded substep's residual
+  and Jacobian from stored snapshots, bitwise (`AdjointReplay`).
+- **Milestone B — adjoint solve:** the backward Lagrange-multiplier sweep with the
+  transposed systems and well Schur complement, objectives on well quantities
+  (`AdjointSolver`).
+- **Milestone C — parameter gradients:** dJ/dPV and dJ/dT first, then permeability,
+  end-point scaling and well controls, all FD-verified.
+
+### 13.2 Run-configuration guarantees
+
+The adjoint is only as good as the runs feeding it; the design rests on four rules (written
+as planned — e.g. one-stop exists but is not the default):
+
+1. **Validity guard on forward runs — warnings first**: when `--adjoint-save` is on,
+   `AdjointRecorder` checks the run configuration at startup and **warns loudly** (log, plus a
+   flag recorded in the HDF5 header) about anything known to threaten exact replay or gradient
+   quality: relaxed CNV acceptance enabled, loose `--tolerance-cnv/--tolerance-mb`, features
+   outside the tested envelope (MSW, networks, aquifers for gradient runs), active
+   explicitly-updated quantities (table in STATUS.md). Initially nothing is refused — the
+   warning list *is* the worklist; individual checks are promoted to hard errors only once a
+   feature is demonstrated broken (or supported and removed from the list). The complete
+   parameter set is written into the HDF5 header (existing `HDF5Serializer::writeHeader`
+   pattern), and the replay/adjoint stage compares it against its own configuration and warns on
+   mismatch.
+2. **Replay always from recorded timesteps**: the backward pass exclusively traverses the
+   recorded accepted substeps (`/adjoint/meta` dt sequence); a forward *re*-run, when needed, uses
+   the PR #7039 fixed-timestep mode driven by the same recorded sequence. No adaptive decisions
+   are ever taken in replay/adjoint stages.
+3. **Same-binary, same-process option**: `flow_adjoint` supports a one-stop mode (forward sweep →
+   immediately backward sweep in the same process) in addition to the two-stage
+   save-then-replay mode. One-stop is the default for gradient computation — it rules out
+   binary/config mismatch between stages and allows a later optimization of keeping states in
+   memory instead of round-tripping through HDF5; two-stage
+   stays as the debugging and test workflow (T2/T3 need the on-disk systems anyway).
+4. **Determinism before replay**: a test that runs the same forward case twice (pinned
+   `--threads-per-process=1`, single rank, fixed partitioning) and requires bitwise-identical
+   summary/restart output sits *below* the replay tests in the ladder (T0.5) — if determinism is
+   broken, T2/T3 failures would otherwise be misattributed to the adjoint machinery.
+
+### 13.3 Test ladder
+
+Named levels used as milestone acceptance criteria; STATUS.md §4d shows how to run them.
+
+- **T0 — perfect forward replay** (from PR #7039): re-run with recorded substep sizes reproduces
+  the forward simulation up to rounding (model2 variants).
+- **T0.5 — determinism**: identical forward run twice (1 thread, 1 rank) ⇒ bitwise identical
+  output; isolates nondeterminism failures from replay failures.
+- **T0.7 — storage-path equivalence (cache vs no-cache)**: the same deck run with
+  `--enable-storage-cache=true` and `=false` (1 thread, 1 rank) must agree. Two tiers:
+  (a) *system level, zero code needed, runnable today*: compare summary + restart output on
+  (i) SPE1CASE1 and a model2 variant (recycling valid — expect agreement to rounding; report the
+  max deviation), (ii) an `opm-tests/spe02` deck (DRSDT active ⇒ non-recycle branch — expect
+  **bitwise** agreement, since cache and no-cache evaluate the identical expression), and
+  (iii) `model6/0B_ROCKTAB_MODEL6` (rock compaction, also non-recycle). Any deviation beyond
+  rounding in (i) or any deviation at all in (ii)/(iii) is a genuine bug in the storage-term
+  handling — worth reporting upstream independently of the adjoint work.
+  (b) *linear-system level, after PR1*: one report step in each mode with
+  `--adjoint-save-system=true`, diff the converged residual/Jacobian dumps directly — this is
+  the form that certifies gradients are independent of the cache mode and gates re-enabling the
+  cache as an adjoint optimization later.
+- **T1 — IO roundtrip** (unit, ctest): adjoint HDF5 store — BCRS matrix, residual, well matrices,
+  snapshots through `serializeOp` — write/read identity.
+- **T2 — perfect re-linearization of one step**: from stored snapshots, recreate residual AND
+  Jacobian (reservoir + per-well B,C,D,resWell) of a single converged forward substep; compare to
+  the stored system, target bitwise with `--threads-per-process=1`, formal pass 1e-12 relative.
+- **T3 — perfect backward propagation** (Milestone A acceptance): full reverse sweep over all
+  accepted substeps with the T2 check at every step (SPE1CASE1, SPE1CASE2_GASWATER,
+  MODEL_1D_DEBUG; later a DRSDT deck).
+- **T4 — adjoint sanity**: 1-cell/1-well/2-step case; trivial objectives (e.g. J = sum of well
+  rate at last step) where λ and dJ/dm can be checked by hand; pins all sign conventions.
+- **T5 — gradient vs finite differences** (Milestones B+C acceptance): central FD on MULTPV/PERM
+  multipliers, cell-wise on MODEL_1D_DEBUG, sampled cells on SPE1; rel-tol ~1e-4 (FD-noise bound).
+
+### 13.4 Reference implementations: JutulDarcy (most relevant) and MRST
+
+**Jutul.jl** (`src/ad/gradients.jl`, SINTEF; JutulDarcy paper: Computational Geosciences
+10.1007/s10596-025-10366-6) implements exactly the recursion we plan, which both validates the
+design and gives naming/structure to align with:
+
+- `solve_adjoint_sensitivities(model, states, timesteps/reports, G)`: backward loop
+  `for i in N:-1:1`, per step a state triplet `(s0, s, s_next)` from an `AdjointPackedResult`
+  (all forward states kept **in memory**; MRST uses `ResultHandler` to spill states to disk —
+  our HDF5 file plays that role, with an in-memory option later).
+- Per step: `adjoint_reassemble!(sim, state, state0, dt, forces, time)` re-linearizes at the
+  stored states (same choice as ours: re-linearize, don't store matrices — our stored
+  system dumps are verification extras only); the adjoint solve uses **the same linear system as
+  forward, transposed**; `next_lagrange_multiplier!` builds
+  `rhs = −(∂J/∂xₙ)ᵀ − (∂Fₙ₊₁/∂xₙ)ᵀ λₙ₊₁` via matrix-free `sens_add_mult!`.
+- **Parameter derivatives**: parameters are promoted to AD variables of an auxiliary "parameter
+  model" (`adjoint_parameter_model` / `swap_primary_with_parameters!`,
+  `parameter_is_differentiable`), and a dedicated simulator in `mode=:sensitivities` assembles
+  `∂Fₙ/∂p`; gradient accumulated as `∇G += (∂Fₙ/∂p)ᵀ λₙ` (`update_sensitivities!`), plus the
+  direct `∂J/∂p` term. Initial-state gradients via `update_state0_sensitivities!`.
+- **Objective interface**: sum-type objectives `G(model, state, dt, step_info, forces)` per
+  (sub)step, `step_info` carrying time/dt/report-step/substep indices; also global objectives
+  over the whole trajectory.
+
+**MRST** (`ad-core/simulators/computeGradientAdjointAD.m`): same backward structure
+(`model.solveAdjoint` per step, states from memory or disk via `ResultHandler`), plus one detail
+worth copying: **control-equation scaling** (`getControlEqScaling`) to normalize well-constraint
+rows (BHP vs rate magnitudes) before the transposed solve — relevant for the conditioning of our
+`D^T` solves and the FD comparison.
+
+Consequences adopted in the design:
+1. Same recursion and re-linearize-backward strategy (already planned) — keep our HDF5 store as
+   the "ResultHandler" equivalent; add a keep-in-memory option later as an optimization.
+2. Objective-function interface copied from Jutul: per-substep
+   `J_n(simulator, wellState, dt, stepInfo)` sum objectives, so OPM/Jutul objectives stay
+   comparable for cross-validation (JutulDarcy reads OPM decks — the same case can be run in both
+   and gradients diffed, an extra verification channel beyond finite differences).
+3. For porosity/PV and transmissibility v1 we keep the *analytic* dR/dp (storage linear in PV,
+   TPFA flux linear in T — simpler and exact). The Jutul "parameters as AD variables" pattern is
+   the designated route for the **end-point-scaling extension**: evaluate storage+flux cell/face
+   contributions with an `Evaluation` type whose derivative slots are local parameters (a
+   parameter-AD pass over `linearize_cell`'s ingredients), instead of threading new variables
+   through the whole model.
