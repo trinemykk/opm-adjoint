@@ -13,7 +13,7 @@ end-point scaling, and well controls — computed by the adjoint method.
 **Milestones A, B and C are complete and finite-difference (FD) verified.** The core
 deliverable — adjoint gradients of well-matching objectives w.r.t.
 poro/perm/trans/end-points/well-controls — works on cases ranging from 1-cell debug
-decks up to field models, and is guarded by a green ctest suite (**15/15**).
+decks up to field models, and is guarded by a ctest suite (52 tests).
 
 ### Development layout
 
@@ -25,8 +25,8 @@ decks up to field models, and is guarded by a green ctest suite (**15/15**).
   commits: `B/C/D` getters on `StandardWellEquations`, a `SummaryState` assembly seam,
   half-trans exposure on `Transmissibility`, `assembleWellEqGivenControls`). HEAD
   `9b07194fe`.
-- **`opm-tests`** — branch `adjoint` (adds `adjoint_tests/MODEL_*_DEBUG` and
-  `SPE1_GRPCTRL` decks).
+- **`opm-tests`** — plain `master` (SPE1/SPE9 decks). The adjoint-specific decks
+  (`MODEL_*_DEBUG`, `SPE1_GRPCTRL`, `DEEPWELL`) ship with the module in `doc/tutorials/`.
 
 ### What works
 
@@ -35,8 +35,7 @@ decks up to field models, and is guarded by a green ctest suite (**15/15**).
 | **Milestone A — exact backward replay** | SPE1 123/123, SPE9 21/21, MODEL_1D_DEBUG 7/7, SPE1_GRPCTRL 120/120 **bitwise**. Full **Norne** (44 431 cells, 36 wells, group ctrl + shut wells, hysteresis, VAPOIL, faults) replays **end-to-end**, ~90 % bitwise (remainder at well-event / hysteresis boundaries — documented v1 approximation). |
 | **Milestone B — adjoint solve** | Backward Lagrange sweep, Schur-reduced, UMFPACK on the transposed system; iterative solves (ilu0 / cpr / **cprt**); **MPI** parallel record/replay + transposed solve (cross-rank transpose bug found & fixed). |
 | **Milestone C — parameter gradients (all FD-verified)** | see the derivatives table below. |
-| **Tests** | ctest **15/15**; FD-verified golden-reference regression set in `tests/references/`; per-eps FD accuracy study in [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md). |
-| **JutulDarcy cross-check** | Set up (`jutul/`); pattern/sign-level agreement (forwards differ by well model). FD remains the authoritative oracle. |
+| **Tests** | ctest (52 tests); FD-verified golden-reference regression set in `tests/references/`; per-eps FD accuracy study in [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md). |
 
 ### One-stop mode (`--adjoint-mode=onestop`)
 
@@ -85,7 +84,7 @@ General-AD is verified exact for PORO/PERM at field scale (SPE9 oracle: PV
 6e-16, PERM 1e-15), so `--adjoint-gradient-method=general-ad` is the
 recommended fast generic path (analytic remains the default oracle).
 
-**Slim's saving shrinks with cell count** (see `adjoint_storage_sizing.md`): on
+**Slim's saving shrinks with cell count**: on
 SPE1 (300 cells) it drops 57% of the snapshot (the schedule dominates), but on
 SPE9 (9000 cells) only **11%** — the per-cell `problem.bin` (history state,
 ~152 B/cell) + `model.bin` (~62 B/cell) dominate and slim cannot touch them.
@@ -118,7 +117,7 @@ CLI overrides JSON). The JSON `mode` is now honoured by the run-mode dispatch
 `--adjoint-mode` is on the command line), so a config file is **self-contained**
 — ERT/Everest can hand over only the JSON and still select `onestop`.
 
-### Memory & performance (measured — see `adjoint_storage_sizing.md`)
+### Memory & performance (measured)
 
 **Memory — the constraint that decides adjoint model size is the backward linear
 solver, not storage.** Measured max RSS:
@@ -250,7 +249,7 @@ opm-simulators rebuilt with hypre registration + a ≥10⁵-cell case to matter.
 
 ### Objective functions (`--adjoint-objective=`)
 
-Per-substep sum objectives `J = Σₖ Jₖ(xₖ, xwₖ)` (Jutul-style interface):
+Per-substep sum objectives `J = Σₖ Jₖ(xₖ, xwₖ)`:
 
 | selector | definition | use |
 |---|---|---|
@@ -454,6 +453,64 @@ because every well-adjoint path `dynamic_cast`s to `StandardWell` and MSW is a
 separate implementation task (the segment system needs its own D/B/C
 elimination). A small MSW gradient test is gated on that support.
 
+### MPI / parallel adjoint — np up to 4 verified against serial
+
+Recording, replay and the transposed solve are all parallel. Each rank
+stores and reads back its own partition: the HDF5 archive uses
+PROCESS_SPLIT (one dataset per rank, the same mechanism as flow's
+save/load-step) and the directory store gets a per-rank sub-directory.
+
+**The transpose is the subtle part.** The forward simulation assembles
+complete *rows* for interior cells, but the adjoint system needs
+complete *columns* - and a plain local transpose drops the cross-rank
+coupling `A_{ki}` where `k` is interior on another rank (the local
+matrix's overlap rows do not carry it). This is a real bug, not
+theoretical: with a plain local transpose the gradients are correct for
+np=2 (a clean split) but **wrong for np>=3** (PV off by ~10%, and with
+the cross-rank term disabled entirely the np=3 PV gradient is off by
+120%). The fix (`TransposedParallelOperator`) applies the exact
+transposed action: it scatters `A^T` over the forward matrix's complete
+interior rows, writing partial sums into both interior and overlap
+entries, then accumulates the overlap contributions back onto their
+owners with `addOwnerCopyToOwnerCopy` - i.e. it communicates the missing
+column part. The (incomplete) local transpose is kept only as the
+preconditioner matrix (opm's parallel ILU0); the solver is BiCGSTAB.
+lambda is made consistent (copyOwnerToAll) after each solve so the
+flux/Bdiag cross terms that read a neighbor's lambda are correct.
+Per-cell and per-face gradients are gathered onto rank 0 (sorted by
+cartesian id); serial output is byte-identical to the pre-MPI behavior
+(the gather is the identity in serial).
+
+```bash
+tests/run-adjoint-mpi-test.sh <flow_adjoint> <deck.DATA> <outdir> [nprocs] [rel-tol]
+```
+
+Compares the np=1 and np=N PV gradient as a sorted value multiset
+(ordering-agnostic, since the partitioned grid reorders cells).
+**--enable-adaptive-time-stepping=false is required**: otherwise the
+parallel forward run can take a different substep sequence than serial
+(parallel linear solves converge slightly differently -> different
+chopping), which changes the trajectory and makes the gradients
+legitimately differ - this masquerades as an adjoint error. Under fixed
+stepping, SPE1 PV gradients match serial to **1e-5 (np=2), 6e-6 (np=3),
+9e-6 (np=4)**; the transmissibility gradient matches to 4.5e-8
+normalized by max|g| (its sorted relative diff looks larger only because
+of near-zero faces). ctest `adjoint_mpi_spe1` (np=2, auto-skips when no
+MPI launcher is found).
+
+**Linear solver in parallel.** The operator is exact, so the
+preconditioner only affects convergence rate; parallel uses opm's
+parallel ILU0 (block-Jacobi over ranks) regardless of the requested
+`--adjoint-linear-solver` (which then only sets tol/maxiter). UMFPACK is
+single-rank and falls back to ilu0 in parallel. In serial, cprt remains
+the fastest correct choice. Run a parallel adjoint manually with e.g.:
+```bash
+mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
+    --enable-adaptive-time-stepping=false --adjoint-save=true
+mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
+    --enable-adaptive-time-stepping=false --adjoint-mode=gradient
+```
+
 ### Known gaps / queue (low priority, none blocking)
 
 - Report-step-0 startup bitwise for model2-like decks; Norne hysteresis / well-event
@@ -463,56 +520,99 @@ elimination). A small MSW gradient test is gated on that support.
   bundle so `assembleControlEqInj/Prod` read it directly), **not yet implemented**.
 - `FlexibleCellEvaluator` (C.2) for exact parameter-AD; end-point scaling is currently
   via cell-local parameter FD.
-- T6 JutulDarcy gradient cross-check is pattern/sign-only.
 
 The end-of-run `AdjointDeckWarnings` scan reports, per deck, every quantity the adjoint
 does not handle exactly (approx-gradient: hysteresis, DRSDT/DRVDT, VAPPARS, guide-rate
 group allocation, well explicit quantities; approx-replay: voidage group control;
 neglected: aquifers, networks). SPE1 prints nothing (clean).
 
+### Explicitly-updated quantities — what the end-of-run warning means
+
+A number of quantities are updated *explicitly* in the forward run
+(between iterations or steps) rather than being solved implicitly. The
+adjoint handles each of three ways. The end-of-run scan
+(`AdjointDeckWarnings.hpp`, printed after every gradient/replay run)
+detects the ones present in the deck and warns; the tags below match the
+warning tags.
+
+| Quantity | Where updated | Replay (J) | Gradient (dJ/dm) | Warning tag |
+|---|---|---|---|---|
+| Saturation hysteresis (HYSTER) | `endTimeStep` (max/min sat in materialLawManager) | **exact** (state serialized) | cross-term neglected | `approx-gradient` |
+| DRSDT / DRVDT (active, max>0) | `endTimeStep` (mixControls_ max Rs/Rv rate) | **exact** (cache-free storage) | cross-term neglected | `approx-gradient` |
+| VAPPARS | `endTimeStep` | **exact** | cross-term neglected | `approx-gradient` |
+| DRSDT/DRVDT **0** (frozen Rs/Rv) | — | **exact** | **exact** (no rate-dependent term) | none (not flagged) |
+| Rock compaction (poro/trans mult from pressure history) | `endTimeStep` | exact (serialized) | cross-term neglected | *(not yet auto-detected)* |
+| Max-oil / max-water saturation tracking (drives VAPPARS) | `updateMaxOilSaturation_` in `endTimeStep` | exact | neglected | via `VAPPARS` (`approx-gradient`) |
+| Well explicit quantities (F0_ wellbore storage, connection hydrostatic pressure drop from prior-state perf densities, explicit B) | `prepareTimeStep` / `computePropertiesForPressures` (`StandardWellConnections.cpp:230`) | exact (recomputed from state k−1) | known cross-term neglected | `approx-gradient` (standing note, printed whenever any other item fires) |
+| Guide-rate group control allocation (target shared among members by guide rates from well potentials) | `BlackoilWellModelGeneric.cpp:1595` `computePotentials` → `updateGuideRates` | **exact** (converged guide rates restored, verified bitwise on gconprod/gconinje/grupcntl/model4) | d(guide-rate)/d(state) cross-term neglected — **negligible/zero for single-member or guide-rate-insensitive groups** (why `adjoint_fd_grpctrl` on SPE1_GRPCTRL still passes); can be material when ≥2 members share a target | `approx-gradient` |
+| **Reservoir-volume / voidage-replacement group control (RESV/VREP/REIN)** | `updateWellControlsAndNetwork` (group voidage target) | **not bitwise** — the effective control target is re-derived from reservoir voidage during the replay assembly | approximate | `approx-replay` |
+| Single-rate group control (ORAT/GRAT/WRAT/LRAT, GRUP) | `updateWellControlsAndNetwork` | **exact** (verified bitwise on gconprod/gconinje/grupcntl/model4) | exact apart from the guide-rate cross-term above | guide-rate row |
+| Well control-mode switching | during Newton | exact (converged controls in WGState) | kinks at switches are real objective non-smoothness, not a bug | none |
+| Aquifers | aquifer `endTimeStep` | **inexact** (aquifer contributions not assembled in replay) | neglected | `neglected` |
+| Extended network (NODEPROP/BRANPROP) | `updateWellControlsAndNetwork` | inexact | neglected | `neglected` |
+
+The `approx-gradient` group is the principled v1 trade-off: the forward
+*state* is serialized so the residual/Jacobian (hence J) is reproduced
+bitwise, but the cross-step derivative of the explicitly-updated quantity
+is dropped from dJ/dm. The `approx-replay` and `neglected` groups are
+where the replay itself is not bitwise — the voidage case is the
+`WellAssemblyState` Stage-2 fix listed under *Known gaps* above.
+
 ---
 
 ## 2. Checkout
 
-The working tree is a set of side-by-side OPM module repos. The adjoint work lives on
-three non-default branches:
+The OPM module repos sit side by side in one directory (called `$OPM` below, e.g.
+`~/OPM`), each with its own `build/` folder. The adjoint work lives on two
+non-default branches:
 
 ```bash
 # opm-simulators: small accessor hooks on top of master
 git -C opm-simulators checkout adjoint-hooks
 
-# opm-tests: adjoint debug decks + SPE1_GRPCTRL
-git -C opm-tests checkout adjoint
-
 # opm-adjoint: the module itself (default branch)
 git -C opm-adjoint checkout master
 ```
 
-`opm-common` and `opm-grid` stay on their normal branches. `opm-adjoint/dune.module`
+`opm-common`, `opm-grid` and `opm-tests` stay on their normal branches. The
+adjoint-specific test decks are in `opm-adjoint/doc/tutorials/` (see its README); the
+SPE1/SPE9 tests use the standard opm-tests decks and are skipped if opm-tests is
+missing. `opm-adjoint/dune.module`
 declares the dependency chain: `dune-istl opm-common opm-grid opm-simulators`.
 
 ---
 
 ## 3. Compile
 
-The module builds like any Dune/OPM module. The existing release tree is
-`builds/release` (Ninja, `CMAKE_BUILD_TYPE=Release`, parallel HDF5 + UMFPACK).
+Build opm-common, opm-grid and opm-simulators first, each in its own `build/` folder,
+then opm-adjoint the same way. Recipe used on macOS (Apple Silicon, DUNE and the other
+dependencies from Homebrew):
 
 ```bash
-cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release
+OPM=~/OPM                          # directory holding the sibling repos
+mkdir -p $OPM/opm-adjoint/build && cd $OPM/opm-adjoint/build
 
-# (re)configure — only needed for a fresh tree
-cmake -G Ninja \
-  -C ../cmake_minimal.cmake \
-  -DCMAKE_PREFIX_PATH=/Users/hnil/OPM_CLEAN/deps/dune \
-  -DCMAKE_BUILD_TYPE=Release \
-  /path/to/opm-adjoint            # plus the other modules as usual
+cmake -DUSE_GPU_BRIDGE=0 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+      -DWITH_NDEBUG=1 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -Dopm-common_DIR=$OPM/opm-common/build \
+      -Dopm-grid_DIR=$OPM/opm-grid/build \
+      -Dopm-simulators_DIR=$OPM/opm-simulators/build \
+      ..
 
-# build just the adjoint binary
-cmake --build . --target flow_adjoint -j8
+make -j12                          # or: make -j12 flow_adjoint
 ```
 
-Producing `builds/release/opm-adjoint/flow_adjoint`.
+This produces `build/flow_adjoint` and the unit-test binaries in `build/bin/`. Notes:
+
+- Use the **same** `-DWITH_NDEBUG`, build type and deployment target as for the other
+  modules (set the deployment target to your macOS version).
+- The explicit `-D<module>_DIR` flags are needed: the module does not find opm-grid and
+  opm-simulators by sibling search on its own.
+- Configure in a fresh `build/` — a `CMakeCache.txt` from another machine breaks it.
+- HDF5 is optional. Without it the archive is a plain directory instead of one `.h5`
+  file, and the HDF5-specific test fails.
 
 > **Build gotcha (important):** downstream executables must use
 > `use_additional_optimization(TARGET ...)`. OPM builds Release with `-UNDEBUG`
@@ -531,8 +631,9 @@ Producing `builds/release/opm-adjoint/flow_adjoint`.
 Set a convenience variable:
 
 ```bash
-FLOW=/Users/hnil/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint/flow_adjoint
-DECK=/Users/hnil/OPM_CLEAN/opm_adjoint/opm-tests/spe1/SPE1CASE1.DATA
+OPM=~/OPM                          # directory holding the sibling repos
+FLOW=$OPM/opm-adjoint/build/flow_adjoint
+DECK=$OPM/opm-tests/spe1/SPE1CASE1.DATA
 ```
 
 ### 4a. Exact backward replay (Milestone A — verifies bitwise re-linearization)
@@ -562,7 +663,7 @@ time-stepping** so a parameter perturbation cannot change the substep sequence (
 would swamp any FD comparison):
 
 ```bash
-DECK=/Users/hnil/OPM_CLEAN/opm_adjoint/opm-tests/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
+DECK=$OPM/opm-adjoint/doc/tutorials/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
 OUT=/tmp/spe1grp
 mkdir -p $OUT
 
@@ -594,8 +695,8 @@ Objectives: `--adjoint-objective=pressure-average | bhp:<WELL> | matchref:<ref>:
 ### 4c. Run the test suite
 
 ```bash
-cd /Users/hnil/OPM_CLEAN/opm_adjoint/builds/release/opm-adjoint
-ctest                      # 15/15, ~30 s
+cd $OPM/opm-adjoint/build
+ctest                      # 52 tests
 ctest -R adjoint_fd        # just the FD-vs-adjoint gradient checks
 ```
 
@@ -604,14 +705,102 @@ MPI, storage-cache equivalence) take `<flow_adjoint> <deck> <out-dir>` and can b
 standalone. They are `bash` scripts — on this machine run them with `bash`, not `zsh`
 (the test one-liners rely on word-splitting).
 
+### 4d. Test levels step by step
+
+Run these in order when something breaks; a failure at a lower level explains failures
+above it. `$FLOW` and `$OPM` as in §4.
+
+**T1 — storage/IO unit tests**
+
+```bash
+$OPM/opm-adjoint/build/bin/test_AdjointStorage      # archive roundtrip, dump comparison
+$OPM/opm-adjoint/build/bin/test_transposeMatrix     # transpose vs umtv, UMFPACK transposed solve
+```
+Expected: `*** No errors detected` from both.
+
+**T0.5 — determinism (run before blaming the replay)**
+
+```bash
+for i in 1 2; do
+  $FLOW $OPM/opm-tests/spe1/SPE1CASE1.DATA --output-dir=/tmp/det$i \
+      --threads-per-process=1 --enable-storage-cache=false
+done
+cmp /tmp/det1/SPE1CASE1.UNSMRY /tmp/det2/SPE1CASE1.UNSMRY && echo DETERMINISTIC
+```
+
+**T0.7 — storage cache vs no-cache equivalence**
+
+```bash
+cd $OPM/opm-adjoint
+bash tests/run-storage-cache-equivalence.sh $FLOW \
+    $OPM/opm-tests/spe1/SPE1CASE1.DATA /tmp/t07
+```
+Expected: `UNSMRY: bitwise identical`, `UNRST: bitwise identical`, PASS. The same check
+is worth running on a DRSDT deck (`spe02/SPE02-RADIAL-02.DATA`) and a ROCKCOMP deck
+(`model6/0B_ROCKTAB_MODEL6.DATA`); any deviation beyond rounding is a storage-term bug
+independent of the adjoint. Pass opm-common's `compareECL` as 4th argument for a
+tolerance-based comparison instead of bitwise.
+
+**T2/T3 — backward replay (Milestone A acceptance)**
+
+```bash
+cd $OPM/opm-adjoint
+bash tests/run-adjoint-replay-test.sh $FLOW \
+    $OPM/opm-tests/spe1/SPE1CASE1.DATA /tmp/replay_spe1
+bash tests/run-adjoint-replay-test.sh $FLOW \
+    doc/tutorials/MODEL_1D_DEBUG/MODEL_1D_DEBUG.DATA /tmp/replay_m1d
+```
+The manual two-step version is §4a. The forward run writes the archive:
+```
+# -> /tmp/adj/SPE1CASE1.ADJOINT/  (or .h5 with HDF5)
+#    adjoint/initial/simulator.bin            initial snapshot
+#    adjoint/substep/<k>/simulator.bin        full state at end of substep k
+#    adjoint/substep/<k>/wgstate.bin          well/group state alone
+#    adjoint/substep/<k>/system/{residual,jacobian}.bin
+#    adjoint/meta.bin, adjoint/parameters
+```
+(one `.h5` file instead of the directory when built with HDF5).
+
+Per-substep log lines (PRT/DBG and stdout):
+```
+replay substep  122 (report step 119, dt 31 days): residual rel diff 0.000e+00 (abs 0.000e+00), Jacobian rel diff 0.000e+00 (abs 0.000e+00)
+...
+Adjoint replay finished: 123/123 substeps within tolerance 1.0e-12 (...)
+```
+Exit code 0 = every substep within tolerance. Tolerances:
+`--adjoint-replay-tolerance` (relative, default 1e-12) and
+`--adjoint-replay-abs-tolerance` (absolute noise floor, default 1e-9 —
+entry differences below it are rounding noise and excluded from the
+relative criterion).
+
+What the replay does per substep k (see `AdjointReplay::replayStep`):
+restore snapshot k−1 → mirror the report-step context
+(`startNextEpisode`/`beginEpisode`) → mirror `prepareStep`
+(`advanceTimeLevel`, `setTime`, `setTimeStepSize`, `beginTimeStep`) →
+iteration-0 assembly (well `prepareTimeStep` explicit quantities from state
+k−1, exactly like forward) → install x_k + WellState_k → final linearization
+→ compare with stored system. Afterwards the linearizer holds the converged
+system of substep k — the state Milestone B's adjoint solve starts from.
+
+**Interpreting failures**
+
+- `WellState size mismatch` on reading a snapshot: archive recorded with an
+  older build — re-run the forward simulation.
+- Residual rel diff large but abs diff ~1e-12: rounding noise from forward
+  retry (chopped step) paths; covered by the abs-tolerance floor.
+- Large diffs on decks with group control, aquifers or networks: check the
+  end-of-run warning against the *Explicitly-updated quantities* table in §1
+  before suspecting a bug.
+
+**Forward-run validity warnings.** With `--adjoint-save=true` the recorder warns when
+the storage cache is enabled, more than 1 thread is used, or system dumps are disabled.
+
 ---
 
 ## 5. Where to read more
 
-- `adjoint_plan.md` — full design rationale and PR sequencing.
-- `adjoint_status.md` — detailed feature catalog (incl. §6 explicitly-updated-quantities
-  table that the end-of-run warning mirrors).
-- `adjoint_refactoring.md` — the Stage-1/2/3 `WellAssemblyState` refactor that closes the
-  remaining group-control / voidage replay gaps.
-- `adjoint_testing.md` — per-test-level instructions.
-- `jutul/README.md` — JutulDarcy cross-check setup (use the Julia LTS channel: `+lts`).
+- `adjoint_code_guide.md` — code-reading guide: source reading order, backward-sweep
+  data flow, gradient mechanisms, opm-simulators hook list.
+- `adjoint_plan.md` — full design rationale, literature and PR sequencing.
+- `tests/FD_ACCURACY.md` — adjoint-vs-FD accuracy as a function of the FD step.
+- `doc/tutorials/README.md` — the adjoint test decks shipped with the module.

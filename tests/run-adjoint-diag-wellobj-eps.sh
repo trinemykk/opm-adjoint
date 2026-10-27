@@ -2,8 +2,9 @@
 # DIAGNOSTIC (not wired into ctest): localizes the bhp-objective FD-vs-adjoint
 # deviation. See STATUS.md "Well-objective (bhp) gradient deviation".
 set -u
-FLOW=/Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint/flow_adjoint
-SPE1=/Users/hnil/Documents/OPM/opm_clean/opm-tests/spe1/SPE1CASE1.DATA
+OPM_ROOT=${OPM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}   # dir with the sibling repos
+FLOW=${FLOW:-$OPM_ROOT/opm-adjoint/build/flow_adjoint}
+SPE1=${SPE1:-$OPM_ROOT/opm-tests/spe1/SPE1CASE1.DATA}
 OUT=$1; CELL=${2:-144}; OBJ=${3:-bhp:PROD}
 mkdir -p $OUT
 STRICT="--threads-per-process=1 --enable-storage-cache=false \

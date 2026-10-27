@@ -26,8 +26,8 @@
  * control case. A number of *explicitly-updated* quantities are handled
  * approximately; this scan looks them up in the deck and warns at the
  * end of a gradient/replay run so a user knows whether their case is in
- * the exact regime. The categories mirror the catalog in
- * opm-adjoint/adjoint_plan.md (explicitly-updated-quantities table).
+ * the exact regime. The categories mirror the explicitly-updated-
+ * quantities table in opm-adjoint/STATUS.md.
  *
  *  - approx-gradient: the forward state IS serialized so REPLAY is exact
  *    (J is exact), but the cross-step derivative of the explicitly-updated

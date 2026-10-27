@@ -1,6 +1,6 @@
 # Adjoint vs finite-difference — accuracy sweep over the FD step
 
-_Generated with `tests/fd_accuracy_sweep.py` (binary `builds/release/opm-adjoint/flow_adjoint`)._
+_Generated with `tests/fd_accuracy_sweep.py` (binary `flow_adjoint`, Release build)._
 
 A small-model check that the adjoint gradient agrees with central finite
 differences (FD) across a **range of FD steps** `eps`. The adjoint value *is*
@@ -176,6 +176,6 @@ For each case the swept location is the cell/face with the largest |dJ/dp| (a we
 ## Reproduce
 
 ```bash
-python3 opm-adjoint/tests/fd_accuracy_sweep.py     # ~1 min
+python3 opm-adjoint/tests/fd_accuracy_sweep.py     # ~1 min; OPM_ROOT/FLOW override paths
 ```
 

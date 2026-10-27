@@ -16,5 +16,10 @@ Single binary `flow_adjoint`:
     flow_adjoint CASE.DATA --adjoint-mode=replay \
         --enable-storage-cache=false --threads-per-process=1
 
-Design and testing documentation: `adjoint_plan.md` and
-`adjoint_testing.md` in the parent working tree (to be moved here).
+Documentation (in this repository):
+
+- `STATUS.md` — status, build/run quickstart, test levels, objectives and derivatives
+- `adjoint_code_guide.md` — code-reading guide and design summary
+- `adjoint_plan.md` — design rationale, literature, PR sequencing
+- `tests/FD_ACCURACY.md` — adjoint-vs-FD accuracy over the FD step
+- `doc/tutorials/` — adjoint test decks used by the ctests

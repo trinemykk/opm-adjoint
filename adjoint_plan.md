@@ -154,7 +154,7 @@ The adjoint is only as good as the runs feeding it, so the design enforces four 
    immediately backward sweep in the same process) in addition to the two-stage
    save-then-replay mode. One-stop is the default for gradient computation — it rules out
    binary/config mismatch between stages and allows a later optimization of keeping states in
-   memory (Jutul-style `AdjointPackedResult`) instead of round-tripping through HDF5; two-stage
+   memory instead of round-tripping through HDF5; two-stage
    stays as the debugging and test workflow (T2/T3 need the on-disk systems anyway).
 4. **Determinism before replay**: a test that runs the same forward case twice (pinned
    `--threads-per-process=1`, single rank, fixed partitioning) and requires bitwise-identical
@@ -166,25 +166,8 @@ The adjoint is only as good as the runs feeding it, so the design enforces four 
 A number of quantities are updated *explicitly* between timesteps (mostly in
 `FlowProblem`/`FlowProblemBlackoil` `beginTimeStep()`/`endTimeStep()`); they are exactly the
 places where replay can silently diverge and where the adjoint recursion has hidden cross-terms.
-An early task (start of PR1, revisited at PR3 and PR4) is an audit pass over
-`FlowProblem::endTimeStep`/`beginTimeStep` and the well model producing a table — for each
-quantity: (a) replay treatment, (b) adjoint treatment, (c) warning condition. Initial catalog:
-
-| Quantity | Where updated | Replay (Milestone A) | Adjoint (Milestones B/C) |
-|---|---|---|---|
-| Hysteresis state (max/min saturations in `materialLawManager_`) | `updateHysteresis_()` in `endTimeStep` | serialized in problem snapshot ⇒ exact | cross-term dR/d(hyst state) neglected v1 ⇒ **warn when hysteresis active**; nohyst variant preferred for gradients |
-| Mixing controls DRSDT/VAPPARS (`mixControls_` max values) | `endTimeStep` | serialized (`FlowProblemBlackoil::serializeOp`) ⇒ exact | neglected cross-term ⇒ warn when active; also disables storage-cache recycling (replay handles, gradient test pending) |
-| Max oil saturation / max water saturation tracking (VAPPARS, rock compaction min pressure) | `updateMaxOilSaturation_` etc. in `endTimeStep` | serialized ⇒ exact | neglected ⇒ warn |
-| Drift compensation `drift_` | end of step | serialized ⇒ exact | recommend `--enable-drift-compensation=false` for gradient runs; warn otherwise |
-| Polymer adsorption / max polymer | `endTimeStep` | serialized ⇒ exact | out of v1 scope; warn |
-| Tracer state | tracer model `endTimeStep` | serialized ⇒ exact | not in objective v1; no cross-term needed if tracers don't feed back |
-| Aquifer internal state | aquifer `endTimeStep` | serialized ⇒ exact | neglected ⇒ exclude aquifer decks from gradient tests; warn |
-| Well explicit quantities (`F0_` wellbore storage, connection pressures, explicit B-factors) | `prepareTimeStep`/`calculateExplicitQuantities` at `beginTimeStep` | recomputed from state k−1 in replay step 3 ⇒ exact | known neglected cross-term (documented v1 approximation); FD tests quantify; fixable via well-level storage-derivative trick |
-| Well/group control switching state | during Newton + `beginTimeStep` | WGState snapshot ⇒ exact (final converged controls) | control-active pattern frozen per step in adjoint; kinks at switches are real (objective nonsmoothness) — note in docs, not a bug |
-| Newton-meta (relaxation, chopped dt history) | AdaptiveTimeStepping | recorded in `/adjoint/meta` | n/a (only accepted steps enter the adjoint) |
-
-The catalog is also the natural reviewer-facing artifact for upstream discussion: it makes
-explicit what "exact replay" covers and what the v1 gradient knowingly ignores.
+The maintained table — replay treatment, gradient treatment and end-of-run warning tag per
+quantity — is in [STATUS.md](STATUS.md), *Explicitly-updated quantities*.
 
 ## Test ladder (named levels, used as milestone acceptance criteria)
 
@@ -217,17 +200,6 @@ explicit what "exact replay" covers and what the v1 gradient knowingly ignores.
   rate at last step) where λ and dJ/dm can be checked by hand; pins all sign conventions.
 - **T5 — gradient vs finite differences** (Milestones B+C acceptance): central FD on MULTPV/PERM
   multipliers, cell-wise on MODEL_1D_DEBUG, sampled cells on SPE1; rel-tol ~1e-4 (FD-noise bound).
-- **T6 — cross-validation vs JutulDarcy** (scripted, not CI): same deck + same objective through
-  `solve_adjoint_sensitivities`; expect close agreement on simple TPFA decks with plain
-  rate/BHP-controlled wells.
-
-**JutulDarcy vs FD for testing — recommendation:** both, in different roles. FD is the
-authoritative oracle (same binary, catches everything end-to-end including deck input handling)
-and is what goes into CI (T5) — but it is noisy (step-size choice) and O(#params) expensive, so
-only on tiny decks. JutulDarcy is the *development* instrument: an independent adjoint on the same
-deck, no FD noise, ideal for locating sign/scaling/convention bugs during Milestone B bring-up and
-for medium-sized cases where FD is unaffordable — but it stays out of CI (Julia dependency, and
-physics/well-model differences put a floor on agreement except for the simplest decks).
 
 ## Plan
 
@@ -378,8 +350,7 @@ unchanged. Concretely:
 Components: `opm/simulators/linalg/transposeMatrix.hpp` (port of 2019 `transpose.hh` + unit test);
 `adjoint/AdjointLinearSolver.hpp` (UMFPack v1 + FlexibleSolver/cprt option behind one interface);
 `adjoint/WellCurveObjective.hpp` — J = Σ w(q−q_obs)², observed data read from a reference run's
-UNSMRY via `Opm::EclIO::ESmry` + keyword config; per-substep sum-objective interface modeled on
-Jutul's `G(model, state, dt, step_info, forces)`; dJ/dxw via EvalWell on
+UNSMRY via `Opm::EclIO::ESmry` + keyword config; per-substep sum-objective interface; dJ/dxw via EvalWell on
 `StandardWellPrimaryVariables` (2019 `ObjectiveFunctions.hpp` is the reference design); apply
 MRST-style control-equation scaling before the transposed well solves;
 `adjoint/AdjointSolver.hpp` (orchestration); additions to `StandardWellEquations` (B/C/D getters,
@@ -627,8 +598,7 @@ Accumulated during the backward sweep, no extra solves:
 
 **Verification:** central finite differences perturbing MULTPV/PERMX cell-wise on MODEL_1D_DEBUG
 (all cells) and a few SPE1 cells, rel-tol ~1e-4; comparison with `adjoint_results` references from
-`add_adjoint_tests`. Extra channel: JutulDarcy reads OPM decks — run the same deck + objective
-through `solve_adjoint_sensitivities` in JutulDarcy and diff gradients (script, not CI).
+`add_adjoint_tests`.
 
 ### Serialization review (requirement 4)
 
@@ -705,8 +675,7 @@ the next feature touches the same code.
 3. **PR3** `flow/flow_adjoint.cpp` binary + AdjointReplay + replay regression test ⇒ T2+T3,
    **Milestone A done**
 4. **PR4** Bdiag pass + WellCurveObjective (JSON config + ESmry) + AdjointSolver on the #6751
-   full system + φ/T multiplier gradients + sign/FD tests ⇒ T4+T5, **B+C v1**; JutulDarcy
-   cross-validation script alongside (T6)
+   full system + φ/T multiplier gradients + sign/FD tests ⇒ T4+T5, **B+C v1**
 5. **PR5** perm chain rule, well-storage cross term, matrix-free transposed operator (if needed),
    end-point scaling, dJ/du well-control gradients, MPI
 

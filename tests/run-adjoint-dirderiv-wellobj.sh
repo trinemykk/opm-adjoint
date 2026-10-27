@@ -5,8 +5,9 @@
 # FD (J+ - J-)/(2 eps) vs adjoint sum_i g_pvmult_i d_i, per objective.
 # PROD switches ORAT->BHP at ~day 973; windows isolate single-mode periods.
 set -eu
-FLOW=/Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint/flow_adjoint
-DECK=/Users/hnil/Documents/OPM/opm_clean/opm-tests/spe1/SPE1CASE1.DATA
+OPM_ROOT=${OPM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}   # dir with the sibling repos
+FLOW=${FLOW:-$OPM_ROOT/opm-adjoint/build/flow_adjoint}
+DECK=${DECK:-$OPM_ROOT/opm-tests/spe1/SPE1CASE1.DATA}
 OUT=${1:?outdir}
 EPS=${2:-1e-3}
 mkdir -p $OUT

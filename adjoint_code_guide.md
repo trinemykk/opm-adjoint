@@ -423,7 +423,7 @@ These are the deliberate v1 simplifications. Each is flagged at runtime by
 |---|---|---|
 | **`Bdiag` = reservoir storage only** — explicit cross-step terms (`DRSDT`/`DRVDT` Rs/Rv caps) missing | `AdjointReplay::captureBdiag_` (`AdjointReplay.hpp:327`) | The documented SPE1 `bhp` gradient deviation (~3 % single-cell). Fix = add the capped-cell `dR_k/dRs_{k-1}` term to `Bdiag`. |
 | **End-point initial-state cross-term** not included | `AdjointEndpointGradients.hpp` (docstring), endpoint accumulators | FD end-point checks require explicitly-initialized decks (no equilibration path). |
-| **Voidage (VREP/RESV/REIN) group control** replay-inexact | well assembly / `AdjointDeckWarnings` | Fix designed (WellAssemblyState Stage-2, `adjoint_refactoring.md`), not implemented. |
+| **Voidage (VREP/RESV/REIN) group control** replay-inexact | well assembly / `AdjointDeckWarnings` | Fix designed (WellAssemblyState Stage-2, see STATUS.md *Known gaps*), not implemented. |
 | **Multisegment wells** — reservoir replays bitwise, but any *well-objective* gradient aborts | `AdjointSolver.hpp:415` (`dynamic_cast<StandardWell>`) | MSW D/B/C elimination is a separate task. |
 | **Aquifers / extended network** neglected | flagged only | Out of v1 scope. |
 
@@ -446,9 +446,7 @@ This file is intended to be edited alongside the code. Practical rules:
   wrong, `grep` the method name. Update the `_Last updated_` date at the top when you
   make a substantive pass.
 
-Related docs (do not duplicate them here): [`STATUS.md`](STATUS.md) (status + run
-recipes), [`adjoint_plan.md`](adjoint_plan.md) (design rationale + PR sequencing),
-[`adjoint_status.md`](adjoint_status.md) (feature catalog + explicitly-updated-quantities
-table), [`adjoint_refactoring.md`](adjoint_refactoring.md) (WellAssemblyState Stage-1/2/3),
-[`adjoint_testing.md`](adjoint_testing.md), [`adjoint_general_ad_review.md`](adjoint_general_ad_review.md),
-[`adjoint_code_assessment.md`](adjoint_code_assessment.md) (code review findings).
+Related docs (do not duplicate them here): [`STATUS.md`](STATUS.md) (status, run
+recipes, explicitly-updated-quantities table), [`adjoint_plan.md`](adjoint_plan.md)
+(design rationale + PR sequencing),
+[`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md).

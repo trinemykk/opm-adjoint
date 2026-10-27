@@ -9,8 +9,9 @@
 #   datum=8335  -> dz=65ft-> nonzero explicit head (cross-step term active)
 # If the head term is the cause, the deviation should differ markedly.
 set -u
-FLOW=/Users/hnil/Documents/OPM/opm_clean/builds/release/opm-adjoint/flow_adjoint
-SPE1=/Users/hnil/Documents/OPM/opm_clean/opm-tests/spe1/SPE1CASE1.DATA
+OPM_ROOT=${OPM_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}   # dir with the sibling repos
+FLOW=${FLOW:-$OPM_ROOT/opm-adjoint/build/flow_adjoint}
+SPE1=${SPE1:-$OPM_ROOT/opm-tests/spe1/SPE1CASE1.DATA}
 OUT=${1:?outdir}
 H=${2:-5e-3}
 mkdir -p $OUT
