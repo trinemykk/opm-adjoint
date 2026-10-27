@@ -1,133 +1,82 @@
 # opm-adjoint
+Adjoint-based gradients for the OPM Flow simulator: gradients of well-matching and other objectives with respect to
+porosity/pore volume, transmissibility, permeability, saturation end points and well controls.
 
-Adjoint-based gradients for the OPM flow simulator, developed as a
-downstream module against **unmodified opm-simulators master** (the
-opm-flowgeomechanics extension pattern): the recording hooks live in a
-derived `AdjointFlowProblem` (virtual `beginEpisode`/`endTimeStep`), the
-well-state normalization in a derived `AdjointWellModel`, and the
-backward replay driver only uses public simulator APIs.
+## Contains
+The opm-adjoint module includes:
+- Interface to OPM Flow simulator (`flow_adjoint`), built against unmodified opm-simulators
+- Recording of forward runs and exact backward replay of every time step
+- Adjoint solver with direct and iterative transposed linear solvers, serial and MPI
+- Objective functions for pressure, bottom-hole pressure, well rates and history matching against a reference run
+- Standalone solver for dumped adjoint systems (`adjoint_system_solve`)
+- Documentation: [STATUS.md](STATUS.md) (status, examples, test levels) and
+  [adjoint_code_guide.md](adjoint_code_guide.md) (code-reading guide, design, literature)
 
-Single binary `flow_adjoint`:
+## Build instructions
+opm-adjoint depends on:
 
-    # forward run with per-substep recording
-    flow_adjoint CASE.DATA --adjoint-save=true --adjoint-save-system=true \
-        --enable-storage-cache=false --threads-per-process=1
-    # backward replay + verification against the stored systems
-    flow_adjoint CASE.DATA --adjoint-mode=replay \
-        --enable-storage-cache=false --threads-per-process=1
+- [opm-common](https://github.com/OPM/opm-common)
+- [opm-grid](https://github.com/OPM/opm-grid)
+- [opm-simulators](https://github.com/OPM/opm-simulators)
 
-## Contents
+Follow the [build instructions on the OPM home page](https://opm-project.org/?page_id=36).
 
-| Path | What it is |
-|---|---|
-| `examples/flow_adjoint.cpp` | The `flow_adjoint` binary: blackoil TPFA Flow plus the adjoint problem, parameters and run modes |
-| `examples/adjoint_system_solve.cpp` | Solves a dumped adjoint system (`--adjoint-dump-system`) outside the simulator |
-| `opm/adjoint/` | The module itself (header-only apart from `AdjointParameters.cpp`), see below |
-| `tests/` | Unit tests, script-driven ctests, FD reference gradients (`tests/references/`) |
-| `doc/tutorials/` | Small decks used by the tests and examples |
-
-Main parts of `opm/adjoint/`:
-
-| Files | Role |
-|---|---|
-| `AdjointFlowProblem`, `AdjointWellModel` | Hooks into the forward run |
-| `AdjointRecorder`, `AdjointStorage`, `AdjointMeta` | What is recorded per substep, and the archive (directory or HDF5) |
-| `AdjointReplay` | Re-linearizes recorded substeps backwards and checks them against the stored systems |
-| `AdjointSolver`, `AdjointLinearSolver`, `*Transpose*` | Backward sweep: transposed solves and gradient accumulation |
-| `AdjointObjective*` | Objective functions (`pressure-average`, `bhp`, `rate`, `match`, `matchref`, `matchsum`) |
-| `AdjointEndpointGradients`, `AdjointResidualEvaluator` | End-point scaling gradients and the general (stencil-local) gradient path |
-| `AdjointDeckWarnings` | End-of-run report of deck features the adjoint handles only approximately |
-
-## Building
-
-Build opm-common, opm-grid and opm-simulators (plain `master`) first, each in its own
-`build/` folder, with the repos side by side; then this module the same way. On macOS
-with DUNE from Homebrew:
-
-```bash
-OPM=~/OPM                          # directory holding the sibling repos
-mkdir -p $OPM/opm-adjoint/build && cd $OPM/opm-adjoint/build
-cmake -DUSE_GPU_BRIDGE=0 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
-      -DWITH_NDEBUG=1 -DCMAKE_BUILD_TYPE=Release \
-      -Dopm-common_DIR=$OPM/opm-common/build \
-      -Dopm-grid_DIR=$OPM/opm-grid/build \
-      -Dopm-simulators_DIR=$OPM/opm-simulators/build \
-      ..
-make -j12
+After the prerequisites are in place, build the opm-adjoint module by running:
+```shell
+mkdir build/
+cd build/
+cmake -Dopm-common_DIR=<path>/opm-common/build \
+      -Dopm-grid_DIR=<path>/opm-grid/build \
+      -Dopm-simulators_DIR=<path>/opm-simulators/build ..
+make
 ```
 
-This gives `build/flow_adjoint`. Use the same `WITH_NDEBUG`, build type and deployment
-target as for the other modules; an `NDEBUG` mismatch is an ABI break that crashes at
-run time. The `-D<module>_DIR` flags are needed, since the module does not find
-opm-grid and opm-simulators on its own. HDF5 is optional (without it the archive is a
-directory). More detail in `STATUS.md` §3.
+Use the same build type and `WITH_NDEBUG` setting as for the other OPM modules. See [STATUS.md](STATUS.md) §3 for a
+complete macOS example.
 
 ## OPM Flow interface
-
-`flow_adjoint` is OPM Flow with its own TypeTag (`FlowAdjointProblem`, inheriting
-`FlowProblemTPFA`), so it reads the same decks and takes all normal Flow options.
-Without `--adjoint-mode` it is a plain forward run.
-
-- **Forward run:** `AdjointFlowProblem` overrides `beginEpisode`/`endTimeStep` and, with
-  `--adjoint-save=true`, stores each accepted substep (state, well/group state, and
-  optionally the residual and Jacobian) in an archive.
-- **Backward run:** `--adjoint-mode=replay|objective|gradient` reloads the archive and
-  walks the substeps backwards through Flow's own linearizer and well model, so the
-  adjoint uses exactly the forward discretization. `--adjoint-mode=onestop` does the
-  forward and backward run in one process.
-- **Output:** gradients are written next to the normal Flow output as
-  `CASE.ADJOINT_GRADIENTS_{PV,TRANS,PERM,WELLCTRL}.txt`, plus `.csv` files and a
-  `.json` summary.
-
-All adjoint options start with `--adjoint-`; `flow_adjoint --help` lists them, and
-`--adjoint-config=<file>.json` sets them from a file. The opm-simulators functions the
-module relies on are listed in `adjoint_code_guide.md` §10.
-
-## Tests
-
-```bash
-cd build && ctest
+The executable `flow_adjoint` is OPM Flow with an interface to the adjoint solver. It reads the same decks and takes
+the same options as `flow`; without adjoint options it is a normal forward run. The adjoint options all start with
+`--adjoint-` (see `flow_adjoint --help`):
+```shell
+# forward run, records an archive
+flow_adjoint CASE.DATA --enable-storage-cache=false --adjoint-save=true
+# backward sweep, writes the gradients
+flow_adjoint CASE.DATA --enable-storage-cache=false \
+             --adjoint-mode=gradient --adjoint-objective=pressure-average
 ```
 
-- **Unit tests:** `AdjointStorage` (archive round-trip), `transposeMatrix` and
-  `systemTranspose` (transposed matrices and solves), and `adjoint_parallel_transpose`
-  (parallel transpose on 2–4 ranks; only built with MPI).
-- **Script tests** (`tests/run-adjoint-*.sh`): replay is bitwise, and adjoint gradients
-  agree with finite differences across parameter families, objectives, solvers and
-  run modes. Tests on the decks in `doc/tutorials/` always run; tests on SPE1/SPE9 run
-  when opm-tests is found next to this repository.
+Other modes are `replay` (verify the recorded run), `objective` (objective value only) and `onestop` (forward and
+backward in one run). Gradients are written as `CASE.ADJOINT_GRADIENTS_*.txt` next to the normal Flow output.
 
-Step-by-step test levels and how to read failures: `STATUS.md` §4d.
+See [tutorials section](#tutorials) for usage.
 
 ## Tutorials
-
-There are no step-by-step tutorials yet. `doc/tutorials/` holds small example decks
-(see its README), and `STATUS.md` §4 walks through a full example. A quick gradient on
-the 3-cell deck, from the repository root:
-
-```bash
+Example decks are in [doc/tutorials](doc/tutorials/README.md), and [STATUS.md](STATUS.md) §4 walks through a complete
+example. A first gradient on the 3-cell model, from the repository root:
+```shell
 D=doc/tutorials/MODEL_1D_DEBUG/MODEL_1D_DEBUG.DATA
-# forward run, recording the archive
 build/flow_adjoint $D --output-dir=/tmp/m1d \
     --enable-storage-cache=false --enable-adaptive-time-stepping=false --adjoint-save=true
-# backward sweep: dJ/d(pore-volume multiplier) per cell
 build/flow_adjoint $D --output-dir=/tmp/m1d \
     --enable-storage-cache=false --enable-adaptive-time-stepping=false \
     --adjoint-mode=gradient --adjoint-objective=pressure-average
 cat /tmp/m1d/MODEL_1D_DEBUG.ADJOINT_GRADIENTS_PV.txt
 ```
 
-## Documentation
-
-Documentation (in this repository):
-
-- `STATUS.md` — status, build/run quickstart, test levels, objectives and derivatives
-- `adjoint_code_guide.md` — code-reading guide, design summary, background and literature
-- `tests/FD_ACCURACY.md` — adjoint-vs-FD accuracy over the FD step
-- `doc/tutorials/` — adjoint test decks used by the ctests
+## Tests
+Unit tests (`test_AdjointStorage`, `test_transposeMatrix`, `test_systemTranspose`, and `test_parallelTranspose` with
+MPI) and script tests (`tests/run-adjoint-*.sh`) are run with
+[CTest](https://cmake.org/cmake/help/book/mastering-cmake/chapter/Testing%20With%20CMake%20and%20CTest.html):
+```shell
+cd build/
+ctest
+```
+The script tests check that the replay is exact and that the adjoint gradients agree with finite differences. Tests on
+the decks in [doc/tutorials](doc/tutorials/) always run; tests on the SPE1/SPE9 decks need
+[opm-tests](https://github.com/OPM/opm-tests) next to this repository.
 
 ## Contributors
+opm-adjoint was developed by:
 
-- Halvor M. Nilsen (SINTEF Digital) — author and maintainer;
-  upstream repository <https://github.com/hnil/opm-adjoint>
-- Trine Mykkeltvedt — build fixes against current OPM master, documentation cleanup
+- [Halvor M. Nilsen](https://github.com/hnil/) ([upstream repository](https://github.com/hnil/opm-adjoint))
