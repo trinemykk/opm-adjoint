@@ -1,0 +1,151 @@
+-- This reservoir simulation deck is made available under the Open Database
+-- License: http://opendatacommons.org/licenses/odbl/1.0/. Any rights in
+-- individual contents of the database are licensed under the Database Contents
+-- License: http://opendatacommons.org/licenses/dbcl/1.0/
+
+-- Copyright (C) 2026 SINTEF Digital, Mathematics and Cybernetics
+
+-- Clean deep-well test deck for the adjoint well-objective gradient.
+-- Three-phase (required by the adjoint TypeTag) but DEAD OIL + DRY GAS + WATER:
+-- no DISGAS / no VAPOIL, so Rs = Rv = 0 always and there is NO reservoir-side
+-- explicit cross-step quantity (no DRSDT/DRVDT/VAPPARS) and no hysteresis. The
+-- gas-oil contact is above the reservoir, so there is no free gas. Single-well
+-- control (no groups). Hence the ONLY explicitly-updated quantity in play is the
+-- STANDARD-well frozen wellbore head (+ F0 + explicit B). A vertical producer
+-- perforates a ~95 m column (large datum-to-perforation depth span), so the
+-- frozen head is material: the StandardWell adjoint bhp gradient is biased,
+-- while the multisegment one (--convert-to-multisegment-well) is exact.
+
+RUNSPEC
+
+TITLE
+  DEEPWELL - clean deep multi-perforation well (dead oil / dry gas / water)
+
+DIMENS
+  3 3 20 /
+
+OIL
+WATER
+GAS
+
+METRIC
+
+TABDIMS
+  1 1 20 20 /
+
+WELLDIMS
+  2 20 1 2 /
+
+WSEGDIMS
+  2 25 20 /
+
+START
+  1 JAN 2020 /
+
+EQLDIMS
+  1 /
+
+UNIFOUT
+
+GRID
+
+DX
+  180*100 /
+DY
+  180*100 /
+DZ
+  180*5 /
+
+TOPS
+  9*2000 /
+
+PORO
+  180*0.2 /
+
+PERMX
+  180*100 /
+PERMY
+  180*100 /
+PERMZ
+  180*10 /
+
+INIT
+
+PROPS
+
+-- dead oil (no dissolved gas)
+PVDO
+  150 1.05 1.1
+  200 1.02 1.2
+  300 1.00 1.4 /
+
+-- dry gas (no vaporised oil)
+PVDG
+  150 0.0130 0.018
+  200 0.0100 0.020
+  300 0.0075 0.024 /
+
+PVTW
+  200 1.0 4.0E-5 0.5 0.0 /
+
+DENSITY
+  800 1000 1.0 /
+
+ROCK
+  200 4.0E-5 /
+
+SWOF
+  0.20 0.0   1.0  0.0
+  0.40 0.05  0.5  0.0
+  0.60 0.20  0.2  0.0
+  0.80 0.50  0.05 0.0
+  1.00 1.0   0.0  0.0 /
+
+SGOF
+  0.00 0.0   1.0  0.0
+  0.20 0.05  0.5  0.0
+  0.50 0.30  0.1  0.0
+  0.80 0.70  0.0  0.0 /
+
+SOLUTION
+
+-- datum 2000, P=200 bar; OWC at 2110 (below reservoir base 2100 => no free
+-- water); GOC at 2030 => a free-gas cap in the upper layers. The deep producer
+-- then draws a mixture of free gas (low density) and oil (high density), so the
+-- wellbore density is strongly state-dependent even though there is NO dissolved
+-- gas (DISGAS off): a clean way to make the frozen StandardWell head biased.
+EQUIL
+  2000 200 2110 0 2030 0 1 0 0 /
+
+SUMMARY
+
+WBHP
+/
+WOPR
+/
+WWPR
+/
+FPR
+
+SCHEDULE
+
+WELSPECS
+  'PROD' 'G1' 2 2 2000 'OIL' /
+  'INJ'  'G1' 1 1 2000 'WATER' /
+/
+
+COMPDAT
+  'PROD' 2 2 1 20 'OPEN' 1* 1* 0.15 /
+  'INJ'  1 1 1 20 'OPEN' 1* 1* 0.15 /
+/
+
+WCONPROD
+  'PROD' 'OPEN' 'ORAT' 80 4* 50 /
+/
+
+WCONINJE
+  'INJ' 'WATER' 'OPEN' 'RATE' 100 1* 400 /
+/
+
+TSTEP
+  10 10 10 10 10 10 10 10 10 10 /

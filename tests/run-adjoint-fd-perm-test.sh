@@ -2,7 +2,7 @@
 # Finite-difference verification of the adjoint PERMEABILITY gradient
 # (chain rule through the one-sided half transmissibilities),
 # specialized for decks whose PERMX comes from a single text include
-# (e.g. adjoint_tests/MODEL_1D_DEBUG, METRIC units -> PERMX in mD).
+# (e.g. doc/tutorials/MODEL_1D_DEBUG, METRIC units -> PERMX in mD).
 #
 #   FD:      dJ/dPERMX_i ~ (J(K_i + d) - J(K_i - d)) / (2 d)   [per mD]
 #   adjoint: column 1 of <CASE>.ADJOINT_GRADIENTS_PERM.txt (per m^2)

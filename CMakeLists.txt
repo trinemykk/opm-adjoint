@@ -101,101 +101,106 @@ target_link_libraries(adjoint_system_solve
 # Look for the opm-tests repository; sets HAVE_OPM_TESTS / OPM_TESTS_ROOT.
 include(Findopm-tests)
 
-# Script-driven verification tests (see adjoint_testing.md). The FD
-# tests run many small forward simulations; all of them use the tiny
-# 3-cell MODEL_1D_DEBUG deck from opm-tests (branch with adjoint_tests/).
+# Script-driven verification tests (see STATUS.md section 4). The FD
+# tests run many small forward simulations; most use the tiny 3-cell
+# MODEL_1D_DEBUG deck. The adjoint-specific decks ship with the module in
+# doc/tutorials, so these tests run without opm-tests.
+set(_tutorials ${PROJECT_SOURCE_DIR}/doc/tutorials)
+set(_m1d ${_tutorials}/MODEL_1D_DEBUG)
+set(_testout ${PROJECT_BINARY_DIR}/script-tests)
+add_test(NAME adjoint_replay_m1d
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
+          $<TARGET_FILE:flow_adjoint>
+          ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/replay_m1d)
+add_test(NAME adjoint_residual_eval_m1d
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-residual-eval-test.sh
+          $<TARGET_FILE:flow_adjoint>
+          ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/reseval_m1d)
+add_test(NAME adjoint_jacobian_eval_m1d
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-jacobian-eval-test.sh
+          $<TARGET_FILE:flow_adjoint>
+          ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/jaceval_m1d)
+add_test(NAME adjoint_gradient_regression
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-gradient-regression.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d} ${_testout}/gradreg)
+add_test(NAME adjoint_fd_pv
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+          ${_testout}/fd_pv)
+# General (stencil-local) gradient mechanism: random directional-
+# derivative FD on the full gradient vector computed in one sweep.
+add_test(NAME adjoint_dirderiv_pv_m1d
+  COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
+          $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG pv
+          ${_testout}/dirderiv_pv)
+add_test(NAME adjoint_dirderiv_perm_m1d
+  COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
+          $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG perm
+          ${_testout}/dirderiv_perm 1e-2)
+# General gradient vs analytic oracle (PV, TRANS, PERM) on one deck.
+add_test(NAME adjoint_general_oracle_m1d
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
+          ${_testout}/general_oracle_m1d)
+# Seeded-AD gradient must reproduce the analytic gradient to ~machine
+# precision (exact dR/dθ in one pass).
+add_test(NAME adjoint_general_ad_oracle_m1d
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
+          ${_testout}/general_ad_oracle_m1d 1e-10 general-ad)
+add_test(NAME adjoint_fd_trans
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-trans-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+          ${_testout}/fd_trans)
+add_test(NAME adjoint_fd_perm
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-perm-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+          ${_testout}/fd_perm)
+add_test(NAME adjoint_fd_wellctrl
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-ctrl-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+          ${_testout}/fd_ctrl)
+add_test(NAME adjoint_fd_endpoint_swl
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d}
+          ${_testout}/fd_endpoint_swl)
+# Same FD verification against the stencil-local endpoint method
+# (cell x ~7 instead of cell x Ncells; whole-domain fallback for
+# perforated cells).
+add_test(NAME adjoint_fd_endpoint_swl_stencil
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d}
+          ${_testout}/fd_endpoint_swl_stencil
+          SWL 0.0 1e-5 1e-3 pressure-average "" stencil)
+add_test(NAME adjoint_solver_m1d
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-solver-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
+          ${_testout}/solver_m1d)
+# Slim archive (no serialized schedule) == full, byte-identical gradients,
+# on the group-control/guide-rate deck (the state most at risk if slim drops
+# something).
+set(_grpctrl ${_tutorials}/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA)
+add_test(NAME adjoint_slim_grpctrl
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-slim-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_grpctrl} ${_testout}/slim_grpctrl)
+# Group-control gradient: FD-verified on SPE1 under GCONPROD group
+# control - proves the adjoint gradient is correct when wells follow a
+# group target, not just single-well control (the field-relevant case).
+add_test(NAME adjoint_fd_grpctrl
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-grpctrl-test.sh
+          $<TARGET_FILE:flow_adjoint> ${_grpctrl} ${_testout}/fd_grpctrl)
+# StandardWell frozen-hydrostatic-head gradient bias, and its removal by the
+# MSW conversion, on a controlled deck (dead oil + dry gas + water, no
+# DISGAS/DRSDT/hysteresis/groups, a free-gas cap making the wellbore density
+# state-dependent, deep multi-perforation well): the StandardWell bhp:PROD
+# gradient is biased (~1% here), the converted-MSW gradient is exact.
+add_test(NAME adjoint_fd_deepwell_msw
+  COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-deepwell-test.sh
+          $<TARGET_FILE:flow_adjoint>
+          ${_tutorials}/DEEPWELL/DEEPWELL.DATA ${_testout}/fd_deepwell_msw)
+
+# Tests on the standard SPE1/SPE9 decks from opm-tests.
 if(HAVE_OPM_TESTS)
-  set(_m1d ${OPM_TESTS_ROOT}/adjoint_tests/MODEL_1D_DEBUG/inputfiles)
-  set(_testout ${PROJECT_BINARY_DIR}/script-tests)
-  if(EXISTS ${_m1d})
-    add_test(NAME adjoint_replay_m1d
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
-              $<TARGET_FILE:flow_adjoint>
-              ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/replay_m1d)
-    add_test(NAME adjoint_residual_eval_m1d
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-residual-eval-test.sh
-              $<TARGET_FILE:flow_adjoint>
-              ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/reseval_m1d)
-    add_test(NAME adjoint_jacobian_eval_m1d
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-jacobian-eval-test.sh
-              $<TARGET_FILE:flow_adjoint>
-              ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/jaceval_m1d)
-    add_test(NAME adjoint_gradient_regression
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-gradient-regression.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d} ${_testout}/gradreg)
-    add_test(NAME adjoint_fd_pv
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
-              ${_testout}/fd_pv)
-    # General (stencil-local) gradient mechanism: random directional-
-    # derivative FD on the full gradient vector computed in one sweep.
-    add_test(NAME adjoint_dirderiv_pv_m1d
-      COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
-              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG pv
-              ${_testout}/dirderiv_pv)
-    add_test(NAME adjoint_dirderiv_perm_m1d
-      COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/run-adjoint-dirderiv-test.py
-              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG perm
-              ${_testout}/dirderiv_perm 1e-2)
-    # General gradient vs analytic oracle (PV, TRANS, PERM) on one deck.
-    add_test(NAME adjoint_general_oracle_m1d
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
-              ${_testout}/general_oracle_m1d)
-    # Seeded-AD gradient must reproduce the analytic gradient to ~machine
-    # precision (exact dR/dθ in one pass).
-    add_test(NAME adjoint_general_ad_oracle_m1d
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
-              ${_testout}/general_ad_oracle_m1d 1e-10 general-ad)
-    add_test(NAME adjoint_fd_trans
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-trans-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
-              ${_testout}/fd_trans)
-    add_test(NAME adjoint_fd_perm
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-perm-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
-              ${_testout}/fd_perm)
-    add_test(NAME adjoint_fd_wellctrl
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-ctrl-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
-              ${_testout}/fd_ctrl)
-    add_test(NAME adjoint_fd_endpoint_swl
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d}
-              ${_testout}/fd_endpoint_swl)
-    # Same FD verification against the stencil-local endpoint method
-    # (cell x ~7 instead of cell x Ncells; whole-domain fallback for
-    # perforated cells).
-    add_test(NAME adjoint_fd_endpoint_swl_stencil
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d}
-              ${_testout}/fd_endpoint_swl_stencil
-              SWL 0.0 1e-5 1e-3 pressure-average "" stencil)
-    add_test(NAME adjoint_solver_m1d
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-solver-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
-              ${_testout}/solver_m1d)
-  endif()
-  # Slim archive (no serialized schedule) == full, byte-identical gradients,
-  # on the group-control/guide-rate deck (the state most at risk if slim drops
-  # something). Guarded here; gated on the SPE1_GRPCTRL deck existing.
-  if(EXISTS ${OPM_TESTS_ROOT}/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA)
-    add_test(NAME adjoint_slim_grpctrl
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-slim-test.sh
-              $<TARGET_FILE:flow_adjoint>
-              ${OPM_TESTS_ROOT}/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA
-              ${_testout}/slim_grpctrl)
-  endif()
-  # Group-control gradient: FD-verified on SPE1 under GCONPROD group
-  # control - proves the adjoint gradient is correct when wells follow a
-  # group target, not just single-well control (the field-relevant case).
-  set(_grpctrl ${OPM_TESTS_ROOT}/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA)
-  if(EXISTS ${_grpctrl})
-    add_test(NAME adjoint_fd_grpctrl
-      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-grpctrl-test.sh
-              $<TARGET_FILE:flow_adjoint> ${_grpctrl} ${_testout}/fd_grpctrl)
-  endif()
   # Scale regression: separate-IQ Jacobian (and general-ad gradients) on
   # SPE9 (9000 cells, DISGAS, multi-perforation wells).
   if(EXISTS ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA)
@@ -349,18 +354,6 @@ if(HAVE_OPM_TESTS)
         COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-convert-msw-test.sh
                 $<TARGET_FILE:flow_adjoint>
                 ${OPM_TESTS_ROOT}/spe9/SPE9_CP_SHORT.DATA ${_testout}/convert_msw_spe9)
-    endif()
-    # StandardWell frozen-hydrostatic-head gradient bias, and its removal by the
-    # MSW conversion, on a controlled deck (dead oil + dry gas + water, no
-    # DISGAS/DRSDT/hysteresis/groups, a free-gas cap making the wellbore density
-    # state-dependent, deep multi-perforation well): the StandardWell bhp:PROD
-    # gradient is biased (~1% here), the converted-MSW gradient is exact.
-    if(EXISTS ${OPM_TESTS_ROOT}/adjoint_tests/DEEPWELL/DEEPWELL.DATA)
-      add_test(NAME adjoint_fd_deepwell_msw
-        COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-deepwell-test.sh
-                $<TARGET_FILE:flow_adjoint>
-                ${OPM_TESTS_ROOT}/adjoint_tests/DEEPWELL/DEEPWELL.DATA
-                ${_testout}/fd_deepwell_msw)
     endif()
     add_test(NAME adjoint_general_ad_oracle_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-general-oracle-test.sh

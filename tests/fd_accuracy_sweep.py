@@ -12,9 +12,12 @@ markdown tables per (model, objective, derivative-family):
 """
 import os, re, subprocess, shutil, sys
 
-ROOT = "/Users/hnil/Documents/OPM/opm_clean"
-FLOW = f"{ROOT}/builds/release/opm-adjoint/flow_adjoint"
-M1D  = f"{ROOT}/opm-tests/adjoint_tests/MODEL_1D_DEBUG/inputfiles"
+# Directory holding the sibling repos (opm-adjoint, opm-tests); override with
+# OPM_ROOT, and the binary with FLOW.
+ROOT = os.environ.get("OPM_ROOT",
+                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+FLOW = os.environ.get("FLOW", f"{ROOT}/opm-adjoint/build/flow_adjoint")
+M1D  = f"{ROOT}/opm-adjoint/doc/tutorials/MODEL_1D_DEBUG"
 TST  = f"{ROOT}/opm-adjoint/tests"
 WORK = "/tmp/fd_accuracy/runs"
 shutil.rmtree(WORK, ignore_errors=True)

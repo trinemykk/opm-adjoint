@@ -1,7 +1,7 @@
 #!/bin/bash
 # Finite-difference verification of the adjoint pore-volume gradient
 # (test level T5 of the adjoint plan), specialized for decks whose PORO
-# comes from a single text include (e.g. adjoint_tests/MODEL_1D_DEBUG).
+# comes from a single text include (e.g. doc/tutorials/MODEL_1D_DEBUG).
 #
 # For each cell i:
 #   FD:      dJ/dporo_i ~ (J(poro_i + d) - J(poro_i - d)) / (2 d)

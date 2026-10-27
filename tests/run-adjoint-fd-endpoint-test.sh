@@ -1,6 +1,6 @@
 #!/bin/bash
 # Finite-difference verification of the adjoint end-point scaling
-# gradients (test level T5), specialized for adjoint_tests/MODEL_1D_DEBUG.
+# gradients (test level T5), specialized for doc/tutorials/MODEL_1D_DEBUG.
 #
 # The stock deck has no ENDSCALE; this script derives an end-point
 # scaling variant: ENDSCALE in RUNSPEC plus a per-cell include for the
