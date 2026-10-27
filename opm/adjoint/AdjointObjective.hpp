@@ -20,8 +20,8 @@
  * \file
  * \brief Objective functions for the adjoint solver.
  *
- * Per-substep sum objectives J = sum_k J_k(x_k, xw_k) (the Jutul-style
- * interface), selected with --adjoint-objective:
+ * Per-substep sum objectives J = sum_k J_k(x_k, xw_k), selected with
+ * --adjoint-objective:
  *
  *  - "pressure-average": J = (1/N) sum_i x_i[pressureIdx] at the final
  *    substep (reservoir-state validation objective).
